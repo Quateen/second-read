@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  background: #fafaf7;
+  color: #111;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.serif { font-family: "Iowan Old Style", Charter, "Source Serif Pro", Georgia, serif; }
+.mono  { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+a { color: #0284c7; text-decoration: none; border-bottom: 1px solid rgba(2,132,199,.25); }
+a:hover { border-bottom-color: #0284c7; }
+
+@media print {
+  /* Keep the persistent legal disclaimer, header, and footer visible on printed audits. */
+  header.site, footer { display: block; }
+  /* Hide interactive-only controls (copy / export buttons) when printing. */
+  .no-print { display: none !important; }
+  body { background: #fff; }
+}
