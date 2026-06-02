@@ -1,4 +1,4 @@
-import { callClaudeJSON } from "./anthropic";
+import { callClaudeJSON, ClaudeJsonResult } from "./anthropic";
 import {
   CLAIM_EXTRACTION_PROMPT,
   CITATION_EXTRACTION_PROMPT,
@@ -42,6 +42,7 @@ export type AuditEnvelope = {
     citationsNotFound: number;
     drugsChecked: number;
     drugsVerified: number;
+    llmFailures: string[];
   };
   mode: "live" | "demo";
 };
@@ -241,7 +242,22 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   if (rewrite.ok) accum(rewrite.usage);
   if (conf.ok) accum(conf.usage);
 
+  // Diagnostics: capture WHY any LLM call failed so failures are visible in the
+  // UI instead of silently collapsing to safe defaults (api / parse / empty).
+  const diag = (name: string, r: ClaudeJsonResult<any>): string | null =>
+    r.ok ? null : `${name}: ${r.reason}${r.detail ? " \u2014 " + r.detail.slice(0, 140) : ""}`;
+  const diagnostics = [
+    diag("claim_pass_a", claim),
+    diag("claim_pass_b", claimB),
+    diag("citations", citationLLM),
+    diag("missing_data", missing),
+    diag("risk_synthesis", synth),
+    diag("safe_rewrite", rewrite),
+    diag("confidence", conf),
+  ].filter((x): x is string => x !== null);
+
   return compose({
+    diagnostics,
     synth: synth.ok ? synth.data : null,
     synthOk: synth.ok,
     conf: conf.ok ? conf.data : null,
@@ -261,6 +277,7 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
 }
 
 function compose(a: {
+  diagnostics: string[];
   synth: any; synthOk: boolean; conf: any; rewrite: any; rewriteOk: boolean;
   citationVerifs: Awaited<ReturnType<typeof verifyOneCitation>>[];
   missing: any; drugVerifs: { name: string; r: RxNormResult }[];
@@ -414,6 +431,11 @@ function compose(a: {
     "Ensemble agreement: " + a.agreement.score + "%",
   ];
   if (contradicted.length) drivers.push(contradicted.length + " cited abstract(s) contradict their claim.");
+  // If LLM-judgment calls failed, say so plainly in the drivers — this is why
+  // factors read "n/a" and the rewrite/agreement are absent.
+  if (a.diagnostics.length) {
+    drivers.push(a.diagnostics.length + " model call(s) failed: " + a.diagnostics.join("; "));
+  }
   if (a.conf?.abstain_recommended && a.conf?.abstention_message) drivers.push("Abstain advised: " + a.conf.abstention_message);
   overrides.forEach((o) => drivers.unshift("Composer override: " + o));
 
@@ -442,6 +464,7 @@ function compose(a: {
       citationsNotFound: notFound.length,
       drugsChecked: a.drugVerifs.length,
       drugsVerified: a.drugVerifs.filter((d) => d.r.status === "found").length,
+      llmFailures: a.diagnostics,
     },
     mode: "live",
   };

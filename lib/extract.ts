@@ -47,7 +47,22 @@ export function extractCitations(text: string): ExtractedCitation[] {
 }
 
 const DRUG_RE = /\b([A-Z][a-zA-Z0-9-]{4,}|[a-z][a-zA-Z0-9-]{5,})\b(?=[^\n]{0,15}\b(mg|mcg|g\/dL|mg\/kg|mg\/m2|units|U\/kg|mL\/kg|mL\/hr)\b)/g;
-const DRUG_STOPWORDS = new Set<string>(["patient","given","initial","initiate","initiated","starting","started","including","include","followed","infusion","bolus","tablet","tablets","oral","intravenous","subcutaneous","every","daily","dosing","regimen","therapy","treatment","weight","kilogram","kilograms","approximately","around"]);
+const DRUG_STOPWORDS = new Set<string>([
+  // dosing / administration nouns
+  "patient","given","initial","initiate","initiated","starting","started","including","include",
+  "followed","infusion","bolus","tablet","tablets","capsule","capsules","oral","intravenous",
+  "subcutaneous","intramuscular","every","daily","dosing","dose","doses","dosage","regimen",
+  "therapy","treatment","weight","kilogram","kilograms","approximately","around",
+  // clinical ACTION VERBS that commonly precede a dose (the 'titrate' class of false positives)
+  "titrate","titrated","titrating","administer","administered","administering","increase",
+  "increased","increasing","decrease","decreased","decreasing","reduce","reduced","reducing",
+  "target","targeted","targeting","maintain","maintained","maintaining","adjust","adjusted",
+  "escalate","escalated","escalating","taper","tapered","tapering","continue","continued",
+  "repeat","repeated","consider","prescribe","prescribed","recommend","recommended","receive",
+  "received","receiving","deliver","delivered","exceed","exceeding","maximum","minimum",
+  // misc clinical context words near units
+  "baseline","interval","between","within","additional","further","second","third","another",
+]);
 
 export function extractDrugCandidates(text: string): string[] {
   const out = new Set<string>();

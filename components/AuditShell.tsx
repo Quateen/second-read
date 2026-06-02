@@ -13,7 +13,7 @@ export type Audit = {
   metaDrivers: string[];
   domains: Domain[];
   rewrite: string;
-  diagnostics?: { durationMs: number; tokensIn: number; tokensOut: number; costEstimateUsd: number; citationsChecked: number; citationsVerified: number; citationsNotFound: number; drugsChecked: number; drugsVerified: number };
+  diagnostics?: { durationMs: number; tokensIn: number; tokensOut: number; costEstimateUsd: number; citationsChecked: number; citationsVerified: number; citationsNotFound: number; drugsChecked: number; drugsVerified: number; llmFailures?: string[] };
   mode?: "live" | "demo";
 };
 
