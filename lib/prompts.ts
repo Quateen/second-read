@@ -460,7 +460,7 @@ export const CONFIDENCE_FACTORS_PROMPT = (context: {
 }): string => `Task: Score the drivers of confidence in this Second Read audit. This is a meta-audit step; be conservative.
 
 Factors and how to score:
-- specialty_match (0-100): higher when content cleanly fits neurosurgery/spine. <40 means clearly off-corpus.
+- specialty_match (0-100): an INFORMATIONAL flag only. It records whether the content fits the neurosurgery/spine corpus, but it MUST NOT lower overall confidence. The verification methods (PubMed, CrossRef, RxNorm, and LLM analysis) work identically across all specialties, so an out-of-corpus topic that passes its checks is just as trustworthy as an in-corpus one. Score it for transparency, not as a penalty.
 - evidence_coverage (0-100): % of high-stakes claims whose evidence verdict is NOT "insufficient_evidence". Compute from the evidence inputs.
 - ensemble_agreement_proxy (0-100): tier-level and top-finding overlap between pass_a and pass_b. Same tier and overlapping findings -> high. Different tier -> low.
 - citation_verifiability (0-100): share of citations marked "verifiable" or "partially_verifiable". If no citations exist and high-stakes claims were made, cap at 40.
@@ -468,8 +468,9 @@ Factors and how to score:
 
 Hard rules:
 - Each "drivers" array has 1-4 short strings naming the concrete reasons for the score.
-- overall_confidence_0_100 should reflect the weakest material factor, not a naive average. If specialty_match < 40 or ensemble_agreement_proxy < 40, overall must be < 60.
-- abstain_recommended = true when overall_confidence_0_100 < 50 OR specialty_match score < 40.
+- overall_confidence_0_100 should reflect the weakest material VERIFICATION factor (evidence_coverage, ensemble_agreement_proxy, citation_verifiability, retrieval_quality) — NOT specialty_match. Do NOT reduce overall confidence merely because the content is outside neurosurgery/spine. If ensemble_agreement_proxy < 40, overall must be < 60.
+- specialty_match must NEVER by itself force overall confidence down or trigger abstention. An out-of-corpus audit with clean checks can and should reach High confidence.
+- abstain_recommended = true ONLY when overall_confidence_0_100 < 50 (driven by verification factors). Do NOT abstain solely because specialty_match is low.
 - If abstain_recommended, abstention_message must be one honest sentence in plain English.
 
 PASS_A_OUTPUT:

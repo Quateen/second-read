@@ -189,7 +189,9 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   // Together with `claim` (low temp) it forms a real self-consistency ensemble.
   const [claim, claimB, citationLLM, missing, citationVerifs, drugVerifs] = await Promise.all([
     callClaudeJSON<any>(CLAIM_EXTRACTION_PROMPT(safe), { temperature: 0.2, maxTokens: 1800 }),
-    callClaudeJSON<any>(CLAIM_EXTRACTION_PROMPT(safe), { temperature: 0.7, maxTokens: 1800 }),
+    // Second self-consistency pass: only its claim categories + corpus flag are used
+    // for the agreement comparison, so it runs lighter (fewer tokens, no parse-retry).
+    callClaudeJSON<any>(CLAIM_EXTRACTION_PROMPT(safe), { temperature: 0.7, maxTokens: 1100, retryOnParse: false }),
     callClaudeJSON<any>(CITATION_EXTRACTION_PROMPT(safe), { temperature: 0.2, maxTokens: 1200 }),
     callClaudeJSON<any>(MISSING_DATA_PROMPT(safe), { temperature: 0.2, maxTokens: 1200 }),
     Promise.all(preCitations.map(verifyOneCitation)),
@@ -290,9 +292,9 @@ function compose(a: {
     a.synth?.tier ?? "critical_issues";
   const overrides: string[] = [];
   if (!a.synthOk) { tier = "critical_issues"; overrides.push("Risk-synthesis step failed; treat as unaudited."); }
-  if (!a.specialtyMatch.in_corpus && (tier === "no_issues_detected" || tier === "minor_concerns")) {
-    tier = "significant_concerns"; overrides.push("Content is outside v1 neuro/spine corpus.");
-  }
+  // NOTE: out-of-corpus content no longer escalates the risk tier. Verification
+  // (PubMed/CrossRef/RxNorm + LLM) works the same across specialties, so domain
+  // alone is not a safety concern. We surface it as an informational note only.
   const verified = a.citationVerifs.filter((v) => v.pubmed?.status === "found" || v.crossref?.status === "found");
   const notFound = a.citationVerifs.filter((v) => (v.pubmed?.status === "not_found" || !v.pubmed) && (v.crossref?.status === "not_found" || !v.crossref));
   const hasHighStakes = Array.isArray(a.claim?.claims) && a.claim.claims.some((c: any) => ["therapeutic","pharmacological","procedural"].includes(c.category));

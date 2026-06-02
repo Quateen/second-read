@@ -17,6 +17,10 @@ export const metadata: Metadata = {
   },
   twitter: { card: "summary", title: "Second Read", description: "A safety audit for AI-generated clinical content." },
   robots: { index: true, follow: true },
+  icons: {
+    icon: [{ url: "/favicon.ico" }, { url: "/favicon-32.png", type: "image/png", sizes: "32x32" }],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180" }],
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -34,10 +38,20 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         </div>
         <header className="site border-b border-line bg-bg">
           <div className="max-w-[920px] mx-auto px-6 py-[18px] flex justify-between items-center">
-            <a href="/" className="serif font-semibold text-[22px] tracking-tight border-0">
-              Second Read
-              <span className="font-sans text-[12px] text-muted uppercase tracking-[.04em] ml-2 font-normal">
-                by Nucleus Digitalis
+            <a href="/" className="flex items-center gap-3 border-0">
+              <img
+                src="/nd-logo.png"
+                alt="Nucleus Digitalis"
+                width={36}
+                height={40}
+                className="rounded-md shadow-sm"
+                style={{ background: "#0e1430" }}
+              />
+              <span className="serif font-semibold text-[22px] tracking-tight">
+                Second Read
+                <span className="font-sans text-[12px] text-muted uppercase tracking-[.04em] ml-2 font-normal">
+                  by Nucleus Digitalis
+                </span>
               </span>
             </a>
             <nav className="text-[14px]">
