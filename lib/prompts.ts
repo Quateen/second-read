@@ -308,12 +308,12 @@ Return ONLY valid JSON matching the schema. No prose, no markdown, no explanatio
  *
  * Tier rules (apply in order, first match wins):
  *   critical_issues       — any fabricated citation tied to a therapeutic claim, OR any contradicted high-stakes claim, OR any critical missing-data item, OR any drug safety finding.
- *   significant_concerns  — multiple unsupported_claim OR overconfident_assertion findings, OR an out_of_corpus_risk on therapeutic content.
+ *   significant_concerns  — multiple unsupported_claim OR overconfident_assertion findings.
  *   minor_concerns        — isolated unsupported/overconfident items with no safety impact.
- *   no_issues_detected    — only when nothing above triggers AND specialty_match is in-corpus.
+ *   no_issues_detected    — only when nothing above triggers.
  *
- * If specialty_match is out-of-corpus and ensemble confidence is below 60, set tier to "significant_concerns"
- * and populate abstention_note.
+ * NOTE: specialty_match is INFORMATIONAL ONLY and must never raise the tier. Out-of-corpus
+ * content is judged purely on its citation, evidence, missing-data, and drug findings.
  */
 export const RISK_SYNTHESIS_PROMPT = (context: {
   input: string;
@@ -326,12 +326,12 @@ export const RISK_SYNTHESIS_PROMPT = (context: {
 
 Tier ladder (first match wins, top-down):
 1) critical_issues — fabricated citation tied to therapy/dose, OR contradicted high-stakes claim, OR a "critical" missing-data item, OR a drug-safety issue.
-2) significant_concerns — multiple unsupported or overconfident claims, OR therapeutic content that is out-of-corpus, OR ensemble confidence < 60 on out-of-corpus content.
+2) significant_concerns — multiple unsupported or overconfident claims.
 3) minor_concerns — isolated unsupported/overconfident items with no safety impact.
-4) no_issues_detected — only when nothing above triggers AND content is in-corpus.
+4) no_issues_detected — only when nothing above triggers.
 
 Hard rules:
-- If specialty_match.in_corpus = false AND confidence < 60, tier must be at least "significant_concerns" and abstention_note must be filled.
+- specialty_match is INFORMATIONAL ONLY. Do NOT raise the tier, lower confidence, or trigger abstention merely because content is outside neurosurgery/spine. The verification methods work identically across all specialties. Judge the content purely on its citation, evidence, missing-data, and drug findings.
 - Reasoning chain must be ordered and reference the inputs (e.g. "3 of 5 citations marked unverifiable", "claim c4 contradicted by cited abstract").
 - Do not invent findings not present in the inputs.
 - top_findings sorted by severity desc, then by linked claim count desc. Cap at 10.

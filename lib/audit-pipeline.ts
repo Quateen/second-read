@@ -1,4 +1,5 @@
 import { callClaudeJSON, ClaudeJsonResult } from "./anthropic";
+import { callLLMJSON, availableProviders, Provider } from "./llm";
 import {
   CLAIM_EXTRACTION_PROMPT,
   CITATION_EXTRACTION_PROMPT,
@@ -92,29 +93,53 @@ function claimCategorySet(data: any): string[] {
   return claims.map((c: any) => String(c?.category ?? "")).filter(Boolean);
 }
 
-function ensembleAgreement(passA: any, passB: any): { score: number; notes: string[] } {
-  const notes: string[] = [];
-  if (!passA || !passB) {
-    return { score: 0, notes: ["One or both self-consistency passes failed to parse."] };
-  }
-  const a = claimCategorySet(passA);
-  const b = claimCategorySet(passB);
-  const setA = new Set(a);
-  const setB = new Set(b);
+function jaccard(a: string[], b: string[]): number {
+  const setA = new Set(a), setB = new Set(b);
   const inter = [...setA].filter((x) => setB.has(x)).length;
   const union = new Set([...setA, ...setB]).size || 1;
-  const jaccard = inter / union;
-  const countDelta = Math.abs(a.length - b.length);
-  const corpusA = !!passA?.specialty_match?.in_corpus;
-  const corpusB = !!passB?.specialty_match?.in_corpus;
-  const corpusMatch = corpusA === corpusB;
-  notes.push(`Claim count: pass A ${a.length}, pass B ${b.length} (\u0394 ${countDelta}).`);
-  notes.push(`Category overlap (Jaccard): ${(jaccard * 100).toFixed(0)}%.`);
-  notes.push(corpusMatch ? "Both passes agree on corpus fit." : "Passes DISAGREE on corpus fit.");
-  // Weighted: 70% category overlap, 30% corpus-verdict agreement, small penalty for count drift.
-  let score = jaccard * 70 + (corpusMatch ? 30 : 0);
-  score -= Math.min(countDelta, 5) * 2;
-  return { score: Math.max(0, Math.min(100, Math.round(score))), notes };
+  return inter / union;
+}
+
+export type EnsemblePass = { provider: Provider | "claude-hot"; label: string; categories: string[]; corpus: boolean; ok: boolean };
+
+// Real multi-model ensemble agreement. Given 2+ passes (from different models,
+// or temperature-varied Claude passes as a fallback), compute mean pairwise
+// category overlap + corpus-verdict consensus into a single 0-100 score.
+function ensembleAgreement(passes: EnsemblePass[]): { score: number; notes: string[]; passes: EnsemblePass[] } {
+  const ok = passes.filter((p) => p.ok);
+  const notes: string[] = [];
+  if (ok.length < 2) {
+    return { score: 0, notes: ["Fewer than two model passes succeeded; agreement cannot be computed."], passes };
+  }
+  // Mean pairwise Jaccard on claim categories.
+  let sum = 0, pairs = 0;
+  for (let i = 0; i < ok.length; i++)
+    for (let j = i + 1; j < ok.length; j++) { sum += jaccard(ok[i].categories, ok[j].categories); pairs++; }
+  const meanJaccard = pairs ? sum / pairs : 0;
+  // Corpus-verdict consensus: fraction agreeing with the majority verdict.
+  const corpusVotes = ok.filter((p) => p.corpus).length;
+  const corpusConsensus = Math.max(corpusVotes, ok.length - corpusVotes) / ok.length;
+  const score = Math.max(0, Math.min(100, Math.round(meanJaccard * 70 + corpusConsensus * 30)));
+  notes.push(`Models compared: ${ok.map((p) => p.label).join(", ")}.`);
+  notes.push(`Mean claim-category overlap: ${(meanJaccard * 100).toFixed(0)}%.`);
+  notes.push(
+    corpusConsensus === 1
+      ? "All models agree on corpus fit."
+      : `Corpus-fit consensus: ${(corpusConsensus * 100).toFixed(0)}% (models disagree).`
+  );
+  for (const p of ok) notes.push(`${p.label}: ${p.categories.length} claim categories.`);
+  return { score, notes, passes };
+}
+
+function toPass(provider: Provider | "claude-hot", label: string, r: { ok: boolean; data?: any } | null): EnsemblePass {
+  const ok = !!r?.ok && !!r?.data;
+  return {
+    provider,
+    label,
+    ok,
+    categories: ok ? claimCategorySet(r!.data) : [],
+    corpus: ok ? !!r!.data?.specialty_match?.in_corpus : false,
+  };
 }
 
 // --- Evidence relevance ----------------------------------------------------
@@ -185,30 +210,56 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   const safeShort = safe.slice(0, 8000);
   const preCitations = extractCitations(safe);
 
-  // claimB is a second, independent claim-extraction pass at a higher temperature.
-  // Together with `claim` (low temp) it forms a real self-consistency ensemble.
-  const [claim, claimB, citationLLM, missing, citationVerifs, drugVerifs] = await Promise.all([
-    callClaudeJSON<any>(CLAIM_EXTRACTION_PROMPT(safe), { temperature: 0.2, maxTokens: 1800 }),
-    // Second self-consistency pass: only its claim categories + corpus flag are used
-    // for the agreement comparison, so it runs lighter (fewer tokens, no parse-retry).
-    callClaudeJSON<any>(CLAIM_EXTRACTION_PROMPT(safe), { temperature: 0.7, maxTokens: 1100, retryOnParse: false }),
+  // Decide the ensemble composition. Claude is always the primary auditor.
+  // If OpenAI/Gemini keys are configured, they run real independent claim passes
+  // (a true 3-model ensemble). If not, we fall back to a second temperature-varied
+  // Claude pass so self-consistency still works on a single key.
+  const providers = availableProviders();
+  const extraProviders = providers.filter((p) => p !== "claude"); // gpt, gemini if present
+  const useMultiModel = extraProviders.length > 0;
+
+  const claimPrompt = CLAIM_EXTRACTION_PROMPT(safe);
+  const [claim, claimHot, citationLLM, missing, citationVerifs, drugVerifs, ...extraPasses] = await Promise.all([
+    callClaudeJSON<any>(claimPrompt, { temperature: 0.2, maxTokens: 1800 }),
+    // Hot Claude pass: used for self-consistency when no other model is available.
+    useMultiModel
+      ? Promise.resolve({ ok: false, reason: "empty" as const })
+      : callClaudeJSON<any>(claimPrompt, { temperature: 0.7, maxTokens: 1100, retryOnParse: false }),
     callClaudeJSON<any>(CITATION_EXTRACTION_PROMPT(safe), { temperature: 0.2, maxTokens: 1200 }),
     callClaudeJSON<any>(MISSING_DATA_PROMPT(safe), { temperature: 0.2, maxTokens: 1200 }),
     Promise.all(preCitations.map(verifyOneCitation)),
     verifyDrugs(safe),
+    // Independent passes from the other providers (parallel, lighter, no parse-retry).
+    ...extraProviders.map((p) => callLLMJSON<any>(p, claimPrompt, { temperature: 0.2, maxTokens: 1100, retryOnParse: false })),
   ]);
-  for (const r of [claim, claimB, citationLLM, missing]) if (r.ok) accum(r.usage);
+  for (const r of [claim, claimHot, citationLLM, missing]) if (r.ok && "usage" in r) accum(r.usage);
+  for (const r of extraPasses) if (r.ok && "usage" in r) accum(r.usage);
 
   const passA = claim.ok ? claim.data : null;
-  const passB = claimB.ok ? claimB.data : null;
-  const agreement = ensembleAgreement(passA, passB);
+
+  // Build the ensemble pass list.
+  const PROVIDER_LABEL: Record<string, string> = { claude: "Claude", gpt: "GPT-4o-mini", gemini: "Gemini", "claude-hot": "Claude (temp 0.7)" };
+  const passes: EnsemblePass[] = [toPass("claude", PROVIDER_LABEL.claude, claim)];
+  if (useMultiModel) {
+    extraProviders.forEach((p, i) => passes.push(toPass(p, PROVIDER_LABEL[p] ?? p, extraPasses[i])));
+  } else {
+    passes.push(toPass("claude-hot", PROVIDER_LABEL["claude-hot"], claimHot));
+  }
+  const agreement = ensembleAgreement(passes);
+  // Second claim output for the confidence prompt's pass-comparison: prefer the
+  // first successful alternate-model pass, else the hot Claude pass.
+  const altRaw = useMultiModel
+    ? (extraPasses.find((r) => r.ok) as any)?.data ?? null
+    : (claimHot.ok ? (claimHot as any).data : null);
 
   // Evidence relevance: score verified abstracts against the highest-stakes claim.
   const evidence = await scoreEvidence(passA, citationVerifs, accum);
 
+  // specialty_match is informational only and must not depress confidence, so the
+  // fallback confidence is neutral (75) regardless of in/out of corpus.
   const specialtyMatch = claim.ok && (claim.data as any)?.specialty_match
-    ? (claim.data as any).specialty_match
-    : { in_corpus: opts.specialty !== "other", confidence_0_100: opts.specialty === "other" ? 30 : 75 };
+    ? { ...(claim.data as any).specialty_match, confidence_0_100: 75 }
+    : { in_corpus: opts.specialty !== "other", confidence_0_100: 75 };
 
   const [synth, rewrite, conf] = await Promise.all([
     callClaudeJSON<any>(RISK_SYNTHESIS_PROMPT({
@@ -234,7 +285,7 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
     }), { temperature: 0.2, maxTokens: 1500 }),
     callClaudeJSON<any>(CONFIDENCE_FACTORS_PROMPT({
       pass_a: passA,
-      pass_b: passB,
+      pass_b: altRaw,
       citations: citationVerifs.map((c) => ({ raw: c.raw, pubmed: c.pubmed?.status, crossref: c.crossref?.status })),
       evidence,
       specialty_match: specialtyMatch,
@@ -246,11 +297,13 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
 
   // Diagnostics: capture WHY any LLM call failed so failures are visible in the
   // UI instead of silently collapsing to safe defaults (api / parse / empty).
-  const diag = (name: string, r: ClaudeJsonResult<any>): string | null =>
-    r.ok ? null : `${name}: ${r.reason}${r.detail ? " \u2014 " + r.detail.slice(0, 140) : ""}`;
+  const diag = (name: string, r: { ok: boolean; reason?: string; detail?: string } | null): string | null =>
+    !r || r.ok ? null : `${name}: ${r.reason}${r.detail ? " \u2014 " + r.detail.slice(0, 140) : ""}`;
   const diagnostics = [
-    diag("claim_pass_a", claim),
-    diag("claim_pass_b", claimB),
+    diag("claim_primary(claude)", claim),
+    ...(useMultiModel
+      ? extraProviders.map((p, i) => diag(`claim_ensemble(${p})`, extraPasses[i] as any))
+      : [diag("claim_selfconsistency(claude-hot)", claimHot as any)]),
     diag("citations", citationLLM),
     diag("missing_data", missing),
     diag("risk_synthesis", synth),
@@ -260,6 +313,7 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
 
   return compose({
     diagnostics,
+    multiModel: useMultiModel,
     synth: synth.ok ? synth.data : null,
     synthOk: synth.ok,
     conf: conf.ok ? conf.data : null,
@@ -280,11 +334,12 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
 
 function compose(a: {
   diagnostics: string[];
+  multiModel: boolean;
   synth: any; synthOk: boolean; conf: any; rewrite: any; rewriteOk: boolean;
   citationVerifs: Awaited<ReturnType<typeof verifyOneCitation>>[];
   missing: any; drugVerifs: { name: string; r: RxNormResult }[];
   claim: any; specialtyMatch: { in_corpus: boolean; confidence_0_100: number };
-  agreement: { score: number; notes: string[] };
+  agreement: { score: number; notes: string[]; passes: EnsemblePass[] };
   evidence: EvidenceVerdict[];
   durationMs: number; tokensIn: number; tokensOut: number;
 }): AuditEnvelope {
@@ -314,7 +369,7 @@ function compose(a: {
   // Low ensemble agreement is a self-consistency red flag.
   if (a.agreement.score < 40 && (tier === "no_issues_detected")) {
     tier = "minor_concerns";
-    overrides.push("The two self-consistency passes disagreed substantially.");
+    overrides.push(a.multiModel ? "The ensemble models disagreed substantially." : "The two self-consistency passes disagreed substantially.");
   }
 
   const tierMap = {
@@ -410,14 +465,17 @@ function compose(a: {
       })),
     },
     {
-      id: "ensemble", label: "Model agreement (self-consistency)",
+      id: "ensemble",
+      label: a.multiModel ? "Model agreement (multi-model ensemble)" : "Model agreement (self-consistency)",
       pill: a.agreement.score >= 70 ? "ok" : a.agreement.score >= 40 ? "warn" : "crit",
       pillText: a.agreement.score + "% AGREEMENT",
-      summary: "Two independent claim-extraction passes (temp 0.2 vs 0.7) compared for self-consistency.",
+      summary: a.multiModel
+        ? `Independent claim extraction across ${a.agreement.passes.filter((p) => p.ok).length} models, compared for consensus.`
+        : "Two independent Claude passes (temp 0.2 vs 0.7) compared for self-consistency.",
       findings: a.agreement.notes.map((n, i) => ({
-        lbl: "PASS COMPARISON",
+        lbl: i === 0 ? "MODELS" : "COMPARISON",
         title: n,
-        src: i === 0 ? "A larger gap suggests the source content is ambiguous or unstable." : "",
+        src: i === 0 ? "Lower agreement suggests the source content is ambiguous or that models genuinely diverge." : "",
         sev: a.agreement.score < 40 ? "important" as const : "contextual" as const,
       })),
     },
@@ -427,11 +485,12 @@ function compose(a: {
   const fScore = (k: string): number | string => factors?.[k]?.score ?? factors?.[k] ?? "n/a";
   const confidence: number = a.conf?.overall_confidence_0_100 ?? 60;
   const drivers: string[] = [
-    "Specialty match: " + fScore("specialty_match"),
     "Evidence coverage: " + fScore("evidence_coverage"),
     "Citation verifiability: " + fScore("citation_verifiability"),
     "Ensemble agreement: " + a.agreement.score + "%",
   ];
+  // Specialty is shown as a neutral context note, never as a confidence penalty.
+  if (!a.specialtyMatch.in_corpus) drivers.push("Specialty: outside neuro/spine corpus (informational; does not lower confidence).");
   if (contradicted.length) drivers.push(contradicted.length + " cited abstract(s) contradict their claim.");
   // If LLM-judgment calls failed, say so plainly in the drivers — this is why
   // factors read "n/a" and the rewrite/agreement are absent.

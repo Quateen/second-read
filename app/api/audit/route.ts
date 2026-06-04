@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { runAudit } from "@/lib/audit-pipeline";
 import { consume } from "@/lib/rate-limit";
+import { saveAudit } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -13,11 +14,14 @@ const BodySchema = z.object({
 });
 
 function getIp(req: NextRequest): string {
-  const fromRuntime = (req as any).ip as string | undefined;
-  if (fromRuntime) return fromRuntime;
-  if (process.env.VERCEL) return "vercel-no-ip";
   const h = req.headers;
-  return h.get("x-forwarded-for")?.split(",")[0]?.trim() || h.get("x-real-ip") || "anon";
+  // On Vercel, x-forwarded-for is the real client chain; take the first hop.
+  const fwd = h.get("x-forwarded-for")?.split(",")[0]?.trim();
+  if (fwd) return fwd;
+  const real = h.get("x-real-ip");
+  if (real) return real;
+  const fromRuntime = (req as any).ip as string | undefined;
+  return fromRuntime || "anon";
 }
 
 export async function POST(req: NextRequest) {
@@ -29,7 +33,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Validation failed", issues: parsed.error.flatten() }, { status: 400 });
   }
   const ip = getIp(req);
-  const rl = consume(ip);
+  const rl = await consume(ip);
   if (!rl.ok) {
     return NextResponse.json({ error: "rate_limited", message: "Daily free tier limit reached. Resets at " + new Date(rl.resetAt).toISOString() }, { status: 429 });
   }
@@ -38,7 +42,9 @@ export async function POST(req: NextRequest) {
   }
   try {
     const audit = await runAudit(parsed.data.input, { specialty: parsed.data.specialty });
-    return NextResponse.json(audit, {
+    // Persist for a shareable link if KV is configured (no-op otherwise).
+    const shareId = await saveAudit(audit);
+    return NextResponse.json({ ...audit, shareId }, {
       headers: {
         "X-RateLimit-Limit": String(rl.limit),
         "X-RateLimit-Remaining": String(rl.remaining),

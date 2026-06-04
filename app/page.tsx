@@ -73,7 +73,7 @@ export default function HomePage() {
           to use."
         </p>
         <p className="text-ink-soft text-[16px]"><strong>It will not approve content.</strong> No clean bills of health. Every audit returns with the caveat that clinical judgment is required.</p>
-        <p className="text-ink-soft text-[16px]"><strong>It will not hide its own uncertainty.</strong> Every audit includes an audit-of-audit confidence score. When the tool is auditing content outside its specialty depth, the audit says so prominently rather than burying it.</p>
+        <p className="text-ink-soft text-[16px]"><strong>It will not hide its own uncertainty.</strong> Every audit includes an audit-of-audit confidence score driven by what can actually be verified — citations, evidence relevance, missing data, and model agreement. When that confidence is low, the audit says so prominently rather than burying it.</p>
         <p className="text-ink-soft text-[16px]"><strong>It will not replace primary source review.</strong> For high-stakes decisions, the audit suggests specific consults and reviews. It does not substitute for them.</p>
       </section>
 
@@ -81,8 +81,8 @@ export default function HomePage() {
         <h2 className="serif text-[28px] font-semibold m-0 mb-4 tracking-tight">Common questions.</h2>
         {[
           ["Is Second Read a medical device?", "No. Second Read is an educational and metacognitive tool designed to help physicians evaluate AI-generated content. It is not regulated as a medical device, makes no diagnostic or treatment recommendations of its own, and must not be used as a substitute for clinical judgment."],
-          ["What language models does it use?", "v1 uses Anthropic Claude (Haiku 4.5) for the LLM components, with two parallel passes at different temperatures for self-consistency. A true three-model ensemble (Claude + GPT + Gemini) is on the roadmap. Citations are verified deterministically against PubMed and CrossRef — not through language models."],
-          ["How accurate is the audit?", "Citation verification accuracy is high because it relies on deterministic API calls to PubMed and CrossRef. Clinical claim assessment is moderately accurate and varies by specialty — the tool is calibrated for neurosurgery and spine surgery in this version; other specialties produce lower audit-of-audit confidence scores by design."],
+          ["What language models does it use?", "Claude (Haiku 4.5) is the primary auditor. When OpenAI and Google keys are configured, the audit runs a real multi-model ensemble — Claude, GPT, and Gemini each extract claims independently and the app measures genuine cross-model agreement. With only the Anthropic key, it falls back to two temperature-varied Claude passes for self-consistency. Citations are always verified deterministically against PubMed and CrossRef — not through language models."],
+          ["How accurate is the audit?", "Citation verification accuracy is high because it relies on deterministic API calls to PubMed and CrossRef. Clinical claim assessment is moderately accurate. The tool was originally calibrated for neurosurgery and spine surgery, but because verification uses the same PubMed, CrossRef, and RxNorm methods for every specialty, confidence is now driven by what can be verified rather than by the specialty itself."],
           ["Can I use this for content from any AI tool?", "Yes. The audit works on AI-generated text regardless of source — ChatGPT, Claude, Perplexity, Gemini, specialty medical AI tools, or any other generator."],
         ].map(([q, a]) => (
           <details key={q} className="border-t border-line py-3.5">

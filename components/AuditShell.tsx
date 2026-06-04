@@ -15,6 +15,7 @@ export type Audit = {
   rewrite: string;
   diagnostics?: { durationMs: number; tokensIn: number; tokensOut: number; costEstimateUsd: number; citationsChecked: number; citationsVerified: number; citationsNotFound: number; drugsChecked: number; drugsVerified: number; llmFailures?: string[] };
   mode?: "live" | "demo";
+  shareId?: string | null;
 };
 
 const SAMPLE = `Patient: 58-year-old male presenting 6 hours after fall from height with C5-C6 ASIA C cervical spinal cord injury. MRI confirms cord compression with edema. Plan:
@@ -26,16 +27,22 @@ const SAMPLE = `Patient: 58-year-old male presenting 6 hours after fall from hei
 5. Consult physical medicine and rehabilitation for early mobilization protocol.`;
 
 const STEPS = [
-  "Extracting clinical claims...",
-  "Extracting citations...",
-  "Verifying citations against PubMed...",
-  "Verifying citations against CrossRef...",
-  "Checking medication names against RxNorm...",
-  "Running missing-data check...",
-  "Comparing model outputs...",
-  "Computing audit-of-audit confidence...",
-  "Assembling audit...",
+  "Extracting clinical claims",
+  "Extracting citations",
+  "Verifying citations against PubMed",
+  "Verifying citations against CrossRef",
+  "Checking medication names against RxNorm",
+  "Running missing-data check",
+  "Comparing model outputs (ensemble)",
+  "Scoring evidence relevance",
+  "Synthesizing risk tier",
+  "Generating safe rewrite",
+  "Computing audit-of-audit confidence",
 ];
+// Approximate per-step dwell (ms) reflecting real relative cost; total ~aligns
+// with a typical 30-55s audit. The bar advances on this schedule while the
+// request is in flight, then snaps to complete when the response returns.
+const STEP_MS = [3500, 2500, 4000, 3500, 2500, 3500, 6000, 5000, 5000, 5000, 4000];
 
 const PILL_CLS: Record<string, string> = {
   ok: "bg-info-soft text-info",
@@ -63,16 +70,18 @@ export default function AuditShell() {
 
   useEffect(() => {
     if (!loading) {
-      if (cycleRef.current) clearInterval(cycleRef.current);
+      if (cycleRef.current) clearTimeout(cycleRef.current);
       return;
     }
     setStepIdx(0);
     let i = 0;
-    cycleRef.current = setInterval(() => {
-      i = Math.min(i + 1, STEPS.length - 1);
-      setStepIdx(i);
-    }, 1500);
-    return () => { if (cycleRef.current) clearInterval(cycleRef.current); };
+    const advance = () => {
+      // Hold on the last step until the response actually returns.
+      if (i >= STEPS.length - 1) return;
+      cycleRef.current = setTimeout(() => { i += 1; setStepIdx(i); advance(); }, STEP_MS[i] ?? 4000);
+    };
+    advance();
+    return () => { if (cycleRef.current) clearTimeout(cycleRef.current); };
   }, [loading]);
 
   useEffect(() => {
@@ -108,6 +117,15 @@ export default function AuditShell() {
     navigator.clipboard.writeText(audit.rewrite);
   }
 
+  const [copiedLink, setCopiedLink] = useState(false);
+  function copyShareLink() {
+    if (!audit?.shareId) return;
+    const url = `${window.location.origin}/a/${audit.shareId}`;
+    navigator.clipboard.writeText(url);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  }
+
   return (
     <div className="bg-white border border-line rounded p-6 mt-6">
       <label htmlFor="input" className="block text-[13px] text-muted uppercase tracking-[.06em] mb-2">
@@ -125,7 +143,7 @@ export default function AuditShell() {
           <span className="text-[13px] text-muted mr-2">Specialty:</span>
           <select value={specialty} onChange={(e) => setSpecialty(e.target.value as any)} className="text-[13px] px-2 py-1 border border-line bg-white rounded">
             <option value="neuro">Neurosurgery / spine</option>
-            <option value="other">Other (lower confidence)</option>
+            <option value="other">Other specialty</option>
           </select>
         </div>
         <div className="flex gap-2.5 flex-wrap">
@@ -138,10 +156,30 @@ export default function AuditShell() {
 
       {loading && (
         <div className="bg-[#f3f1ea] border border-line p-4 mt-4 rounded">
-          <div className="mono text-[13.5px] text-ink-soft">{STEPS[stepIdx]}</div>
-          <div className="h-[3px] bg-[#e0ddd4] mt-3 overflow-hidden rounded">
-            <div className="h-full bg-ink transition-all" style={{ width: ((stepIdx + 1) / STEPS.length) * 100 + "%" }} />
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[13px] font-medium text-ink uppercase tracking-[.06em]">Auditing</span>
+            <span className="mono text-[12px] text-muted">Step {stepIdx + 1} of {STEPS.length}</span>
           </div>
+          <div className="h-[4px] bg-[#e0ddd4] overflow-hidden rounded mb-4">
+            <div className="h-full bg-ink transition-all duration-700 ease-out" style={{ width: ((stepIdx + 1) / STEPS.length) * 100 + "%" }} />
+          </div>
+          <ul className="space-y-1.5">
+            {STEPS.map((s, i) => {
+              const done = i < stepIdx;
+              const active = i === stepIdx;
+              return (
+                <li key={s} className={"flex items-center gap-2.5 text-[13.5px] " + (active ? "text-ink font-medium" : done ? "text-muted" : "text-[#b8b4a8]")}>
+                  <span className={"inline-flex items-center justify-center w-[16px] h-[16px] rounded-full border text-[10px] shrink-0 " + (done ? "bg-ink border-ink text-white" : active ? "border-ink text-ink" : "border-[#d6d2c6] text-transparent")}>
+                    {done ? "\u2713" : active ? "" : ""}
+                  </span>
+                  <span>{s}{active ? "\u2026" : ""}</span>
+                  {active && (
+                    <span className="inline-block w-[12px] h-[12px] border-2 border-ink border-t-transparent rounded-full animate-spin ml-1" />
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         </div>
       )}
 
@@ -202,9 +240,14 @@ export default function AuditShell() {
             <h3 className="serif text-[18px] font-semibold m-0">Safe rewrite</h3>
             <p className="text-muted text-[12.5px] mt-1.5 mb-2.5">Fabricated citations removed. Overconfident claims downgraded. Caveats added.</p>
             <pre className="whitespace-pre-wrap mono text-[13px] leading-[1.6] text-ink bg-bg border border-line p-3.5 rounded-[2px] m-0">{audit.rewrite}</pre>
-            <div className="mt-3 flex gap-2.5 no-print">
+            <div className="mt-3 flex gap-2.5 no-print flex-wrap">
               <button onClick={copyRewrite} className="text-[13px] px-3.5 py-2 bg-transparent text-ink border border-ink rounded-[2px]">Copy rewrite</button>
               <button onClick={() => window.print()} className="text-[13px] px-3.5 py-2 bg-transparent text-ink border border-ink rounded-[2px]">Export as PDF</button>
+              {audit.shareId && (
+                <button onClick={copyShareLink} className="text-[13px] px-3.5 py-2 bg-transparent text-ink border border-ink rounded-[2px]">
+                  {copiedLink ? "Link copied \u2713" : "Copy shareable link"}
+                </button>
+              )}
             </div>
           </div>
         </div>
