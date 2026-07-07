@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 type Finding = { lbl: string; title: string; src: string; sev: "critical" | "important" | "contextual" };
 type Domain = { id: string; label: string; pill: "ok" | "warn" | "crit" | "neut"; pillText: string; summary: string; findings: Finding[] };
 export type Audit = {
-  verdictTier: "no-issues" | "minor" | "significant" | "critical";
+  verdictTier: "no-issues" | "minor" | "significant" | "critical" | "incomplete";
   verdictTitle: string;
   verdictBadge: string;
   reason: string;
@@ -52,6 +52,9 @@ const PILL_CLS: Record<string, string> = {
 };
 const BADGE_CLS: Record<string, string> = {
   "no-issues": "bg-info-soft text-info",
+  // AUDIT_INCOMPLETE: same neutral style as "no-issues" — never green, never red.
+  // The top clinical-alarm tier must never mean "the audit failed".
+  incomplete: "bg-info-soft text-info",
   minor: "bg-[#f3f0e6] text-[#5a4a00]",
   significant: "bg-warn-soft text-warn",
   critical: "bg-crit-soft text-crit",

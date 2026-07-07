@@ -9,10 +9,14 @@ import {
   CONFIDENCE_FACTORS_PROMPT,
   EVIDENCE_RELEVANCE_PROMPT,
 } from "./prompts";
-import { extractCitations, extractDrugCandidates } from "./extract";
+import { extractCitations, extractDrugCandidates, ExtractedCitation } from "./extract";
 import { verifyByPmid as pubmedByPmid, verifyByCitation as pubmedByCit, PubMedResult } from "./pubmed";
 import { verifyByDoi as crByDoi, verifyByQuery as crByQuery, CrossRefResult } from "./crossref";
 import { verifyDrugName, RxNormResult } from "./rxnorm";
+
+// High-stakes claim categories: acting on one without support/verification is a safety concern.
+// Shared by evidence scoring and the zero-citation escalation so the two lists never drift.
+const HIGH_STAKES_CATEGORIES = ["therapeutic", "pharmacological", "procedural", "diagnostic"] as const;
 
 export type AuditDomain = {
   id: "citations" | "missing" | "drugs" | "risk" | "rewrite" | "evidence" | "ensemble";
@@ -24,7 +28,7 @@ export type AuditDomain = {
 };
 
 export type AuditEnvelope = {
-  verdictTier: "no-issues" | "minor" | "significant" | "critical";
+  verdictTier: "no-issues" | "minor" | "significant" | "critical" | "incomplete";
   verdictTitle: string;
   verdictBadge: string;
   reason: string;
@@ -82,6 +86,60 @@ async function verifyDrugs(text: string) {
   const candidates = extractDrugCandidates(text);
   if (!candidates.length) return [];
   return Promise.all(candidates.map(async (n) => ({ name: n, r: await verifyDrugName(n) })));
+}
+
+// --- Citation union (Fix 4) ------------------------------------------------
+// Convert the LLM citation-extraction output into the same ExtractedCitation
+// shape the deterministic regex produces, so both sources can be verified by
+// the identical PubMed/CrossRef path.
+function citationsFromLLM(llm: any): ExtractedCitation[] {
+  const arr = Array.isArray(llm?.citations) ? llm.citations : [];
+  const out: ExtractedCitation[] = [];
+  for (const c of arr) {
+    const comp = c?.components ?? {};
+    const doi = typeof comp.doi === "string" && comp.doi.trim() ? comp.doi.trim() : undefined;
+    const pmidRaw = comp.pmid != null ? String(comp.pmid).trim() : "";
+    const pmid = /^\d{4,9}$/.test(pmidRaw) ? pmidRaw : undefined;
+    const yearNum = comp.year != null ? Number(comp.year) : NaN;
+    const year = Number.isFinite(yearNum) && yearNum > 1800 && yearNum < 2100 ? yearNum : undefined;
+    // authors may arrive as a string OR (a common LLM deviation) an array — coerce both.
+    const authorsStr = Array.isArray(comp.authors)
+      ? comp.authors.filter((x: any) => typeof x === "string").join(", ")
+      : typeof comp.authors === "string" ? comp.authors : "";
+    const author = authorsStr.trim() ? authorsStr.split(/[,;]| and /i)[0].trim() : undefined;
+    const journal = typeof comp.journal === "string" && comp.journal.trim() ? comp.journal.trim() : undefined;
+    const title = typeof comp.title === "string" && comp.title.trim() ? comp.title.trim() : undefined;
+    const raw = typeof c?.raw_text === "string" && c.raw_text.trim()
+      ? c.raw_text.trim()
+      : (doi || pmid || [author, year].filter(Boolean).join(" ")).trim();
+    if (!raw) continue;
+    if (doi) out.push({ raw, doi });
+    else if (pmid) out.push({ raw, pmid });
+    else if (author && year) out.push({ raw, author, year, journal, title });
+  }
+  return out;
+}
+
+function citationKey(c: ExtractedCitation): string {
+  if (c.doi) return "doi:" + c.doi.toLowerCase();
+  if (c.pmid) return "pmid:" + c.pmid;
+  // Key on the first author's SURNAME only (first whitespace token) so the deterministic
+  // extractor's "Kaplan" and the LLM extractor's "Kaplan RJ" dedupe to the same citation.
+  const surname = (c.author ?? "").toLowerCase().split(/\s+/)[0];
+  return "auth:" + surname + "|" + (c.year ?? "") + "|" + (c.journal ?? "").toLowerCase();
+}
+
+// Union the deterministic and LLM-surfaced citations (dedupe), capped, base first.
+function mergeCitations(base: ExtractedCitation[], extra: ExtractedCitation[]): ExtractedCitation[] {
+  const seen = new Set(base.map(citationKey));
+  const merged = [...base];
+  for (const c of extra) {
+    const k = citationKey(c);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    merged.push(c);
+  }
+  return merged.slice(0, 30);
 }
 
 // --- Self-consistency ensemble proxy ---------------------------------------
@@ -161,7 +219,7 @@ async function scoreEvidence(
   const claims: any[] = Array.isArray(claim?.claims) ? claim.claims : [];
   if (!claims.length) return [];
   const highStakes = claims.filter((c) =>
-    ["therapeutic", "pharmacological", "procedural", "diagnostic"].includes(c?.category)
+    (HIGH_STAKES_CATEGORIES as readonly string[]).includes(c?.category)
   );
   const pool = (highStakes.length ? highStakes : claims).slice(0, 6);
   // Only citations with a real PubMed abstract are worth scoring.
@@ -208,7 +266,9 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
 
   const safe = sanitizeForPrompt(input);
   const safeShort = safe.slice(0, 8000);
-  const preCitations = extractCitations(safe);
+  // Bound the regex citation pass to a fixed slice so it stays linear regardless of the
+  // operator-configurable MAX_AUDIT_INPUT_CHARS (VANCOUVER_RE backtracking is polynomial).
+  const preCitations = extractCitations(safeShort);
 
   // Decide the ensemble composition. Claude is always the primary auditor.
   // If OpenAI/Gemini keys are configured, they run real independent claim passes
@@ -235,7 +295,28 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   for (const r of [claim, claimHot, citationLLM, missing]) if (r.ok && "usage" in r) accum(r.usage);
   for (const r of extraPasses) if (r.ok && "usage" in r) accum(r.usage);
 
-  const passA = claim.ok ? claim.data : null;
+  // A step is only usable if it parsed to the OBJECT shape its prompt specifies. The tolerant
+  // extractJSON can salvage a stray array/fragment from noncompliant output; such a payload must
+  // count as a FAILED step (cap confidence, don't silently disable a downstream safety check),
+  // never be trusted just because JSON.parse succeeded.
+  const isObj = (x: any): boolean => x != null && typeof x === "object" && !Array.isArray(x);
+  const claimUsable = claim.ok && isObj(claim.data) && Array.isArray(claim.data.claims);
+  const citationLLMUsable = citationLLM.ok && isObj(citationLLM.data) && Array.isArray(citationLLM.data.citations);
+  const missingUsable = missing.ok && isObj(missing.data) && Array.isArray(missing.data.missing_items);
+
+  const passA = claimUsable ? claim.data : null;
+
+  // Fix 4 (union): verify any citations the LLM extractor surfaced that the
+  // deterministic regex missed. The deterministic pass (citationVerifs) always
+  // runs regardless of the LLM step, so verification survives an LLM failure;
+  // this only ADDS net-new citations, then verifies the full union.
+  const llmExtraCitations = citationLLMUsable ? citationsFromLLM(citationLLM.data) : [];
+  const mergedCitations = mergeCitations(preCitations, llmExtraCitations);
+  const netNewCitations = mergedCitations.slice(preCitations.length);
+  const extraVerifs = netNewCitations.length
+    ? await Promise.all(netNewCitations.map(verifyOneCitation))
+    : [];
+  const allVerifs = [...citationVerifs, ...extraVerifs];
 
   // Build the ensemble pass list.
   const PROVIDER_LABEL: Record<string, string> = { claude: "Claude", gpt: "GPT-4o-mini", gemini: "Gemini", "claude-hot": "Claude (temp 0.7)" };
@@ -253,7 +334,7 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
     : (claimHot.ok ? (claimHot as any).data : null);
 
   // Evidence relevance: score verified abstracts against the highest-stakes claim.
-  const evidence = await scoreEvidence(passA, citationVerifs, accum);
+  const evidence = await scoreEvidence(passA, allVerifs, accum);
 
   // specialty_match is informational only and must not depress confidence, so the
   // fallback confidence is neutral (75) regardless of in/out of corpus.
@@ -264,29 +345,29 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   const [synth, rewrite, conf] = await Promise.all([
     callClaudeJSON<any>(RISK_SYNTHESIS_PROMPT({
       input: safeShort.slice(0, 4000),
-      claims: claim.ok ? claim.data : null,
+      claims: claimUsable ? claim.data : null,
       citations: {
-        llm: citationLLM.ok ? citationLLM.data : null,
-        verification: citationVerifs.map((c) => ({
+        llm: citationLLMUsable ? citationLLM.data : null,
+        verification: allVerifs.map((c) => ({
           raw: c.raw,
           pubmed: c.pubmed?.status,
           crossref: c.crossref?.status,
         })),
       },
       evidence,
-      missing_data: missing.ok ? missing.data : null,
+      missing_data: missingUsable ? missing.data : null,
       specialty_match: specialtyMatch,
     }), { temperature: 0.2, maxTokens: 1200 }),
     callClaudeJSON<any>(SAFE_REWRITE_PROMPT({
       input: safeShort,
       findings: null,
-      citations: citationVerifs.map((c) => ({ raw: c.raw, pubmed: c.pubmed?.status, crossref: c.crossref?.status })),
+      citations: allVerifs.map((c) => ({ raw: c.raw, pubmed: c.pubmed?.status, crossref: c.crossref?.status })),
       specialty_match: { in_corpus: specialtyMatch.in_corpus },
     }), { temperature: 0.2, maxTokens: 1500 }),
     callClaudeJSON<any>(CONFIDENCE_FACTORS_PROMPT({
       pass_a: passA,
       pass_b: altRaw,
-      citations: citationVerifs.map((c) => ({ raw: c.raw, pubmed: c.pubmed?.status, crossref: c.crossref?.status })),
+      citations: allVerifs.map((c) => ({ raw: c.raw, pubmed: c.pubmed?.status, crossref: c.crossref?.status })),
       evidence,
       specialty_match: specialtyMatch,
     }), { temperature: 0.1, maxTokens: 800 }),
@@ -311,18 +392,31 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
     diag("confidence", conf),
   ].filter((x): x is string => x !== null);
 
+  // Fix 2/3: steps whose failure must NOT read as a CRITICAL verdict and must collapse
+  // audit-of-audit confidence. Includes the foundational claim pass and the confidence
+  // computation itself (a failed confidence step must never render as a Moderate default).
+  const synthUsable = synth.ok && isObj(synth.data);
+  const confUsable = conf.ok && isObj(conf.data) && typeof conf.data.overall_confidence_0_100 === "number";
+  const coreStepFailures: string[] = [];
+  if (!claimUsable) coreStepFailures.push("claims");
+  if (!citationLLMUsable) coreStepFailures.push("citations");
+  if (!missingUsable) coreStepFailures.push("missing_data");
+  if (!synthUsable) coreStepFailures.push("risk_synthesis");
+  if (!confUsable) coreStepFailures.push("confidence");
+
   return compose({
     diagnostics,
+    coreStepFailures,
     multiModel: useMultiModel,
-    synth: synth.ok ? synth.data : null,
-    synthOk: synth.ok,
-    conf: conf.ok ? conf.data : null,
+    synth: synthUsable ? synth.data : null,
+    synthOk: synthUsable,
+    conf: confUsable ? conf.data : null,
     rewrite: rewrite.ok ? rewrite.data : null,
     rewriteOk: rewrite.ok,
-    citationVerifs,
-    missing: missing.ok ? missing.data : null,
+    citationVerifs: allVerifs,
+    missing: missingUsable ? missing.data : null,
     drugVerifs,
-    claim: claim.ok ? claim.data : null,
+    claim: claimUsable ? claim.data : null,
     specialtyMatch,
     agreement,
     evidence,
@@ -334,6 +428,7 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
 
 function compose(a: {
   diagnostics: string[];
+  coreStepFailures: string[];
   multiModel: boolean;
   synth: any; synthOk: boolean; conf: any; rewrite: any; rewriteOk: boolean;
   citationVerifs: Awaited<ReturnType<typeof verifyOneCitation>>[];
@@ -343,33 +438,51 @@ function compose(a: {
   evidence: EvidenceVerdict[];
   durationMs: number; tokensIn: number; tokensOut: number;
 }): AuditEnvelope {
-  let tier: "critical_issues" | "significant_concerns" | "minor_concerns" | "no_issues_detected" =
-    a.synth?.tier ?? "critical_issues";
+  type Tier = "critical_issues" | "significant_concerns" | "minor_concerns" | "no_issues_detected" | "audit_incomplete";
+  const SYNTH_TIERS = ["critical_issues", "significant_concerns", "minor_concerns", "no_issues_detected"];
   const overrides: string[] = [];
-  if (!a.synthOk) { tier = "critical_issues"; overrides.push("Risk-synthesis step failed; treat as unaudited."); }
+  // Fix 2 (+ review hardening): a risk-synthesis step that FAILED, or that parsed to something
+  // without a recognized tier (missing / mis-cased / a mis-extracted JSON fragment), produced NO
+  // usable verdict. Treat both as AUDIT_INCOMPLETE — never default to the greenest tier, and never
+  // index tierMap with an unchecked string. The absence of a verdict is neither CRITICAL nor approval.
+  const synthTier = a.synth && typeof a.synth === "object" ? a.synth.tier : undefined;
+  const synthTierValid = typeof synthTier === "string" && SYNTH_TIERS.includes(synthTier);
+  const auditIncomplete = !a.synthOk || !synthTierValid;
+  let tier: Tier = auditIncomplete ? "audit_incomplete" : (synthTier as Tier);
+  if (auditIncomplete) {
+    overrides.push("Risk synthesis did not produce a usable verdict, so none is shown. Absence of a verdict is not approval.");
+  }
+  // Steps that invalidate trust in this run (for the confidence cap + drivers). When synthesis
+  // produced no usable tier but did not hard-fail, its failure is not in coreStepFailures — add it.
+  const failedSteps = [...a.coreStepFailures];
+  if (auditIncomplete && !failedSteps.includes("risk_synthesis")) failedSteps.push("risk_synthesis");
   // NOTE: out-of-corpus content no longer escalates the risk tier. Verification
   // (PubMed/CrossRef/RxNorm + LLM) works the same across specialties, so domain
   // alone is not a safety concern. We surface it as an informational note only.
   const verified = a.citationVerifs.filter((v) => v.pubmed?.status === "found" || v.crossref?.status === "found");
   const notFound = a.citationVerifs.filter((v) => (v.pubmed?.status === "not_found" || !v.pubmed) && (v.crossref?.status === "not_found" || !v.crossref));
-  const hasHighStakes = Array.isArray(a.claim?.claims) && a.claim.claims.some((c: any) => ["therapeutic","pharmacological","procedural"].includes(c.category));
-  if (hasHighStakes && verified.length === 0 && tier === "no_issues_detected") {
-    tier = "significant_concerns"; overrides.push("High-stakes claims with zero verifiable citations.");
-  }
-  // Evidence-relevance escalation: a contradicted citation is a critical signal.
+  const hasHighStakes = Array.isArray(a.claim?.claims) && a.claim.claims.some((c: any) => (HIGH_STAKES_CATEGORIES as readonly string[]).includes(c.category));
   const contradicted = a.evidence.filter((e) => e.verdict === "contradicted");
   const unsupported = a.evidence.filter((e) => e.verdict === "unsupported");
-  if (contradicted.length > 0 && tier !== "critical_issues") {
-    tier = "critical_issues";
-    overrides.push("A cited abstract contradicts the claim it was used to support.");
-  } else if (unsupported.length > 0 && (tier === "no_issues_detected" || tier === "minor_concerns")) {
-    tier = "significant_concerns";
-    overrides.push("A cited source does not actually support its claim.");
-  }
-  // Low ensemble agreement is a self-consistency red flag.
-  if (a.agreement.score < 40 && (tier === "no_issues_detected")) {
-    tier = "minor_concerns";
-    overrides.push(a.multiModel ? "The ensemble models disagreed substantially." : "The two self-consistency passes disagreed substantially.");
+  // Escalations only apply when a real verdict was produced. An incomplete audit
+  // stays incomplete — partial signals must not flip it to a colored tier.
+  if (!auditIncomplete) {
+    if (hasHighStakes && verified.length === 0 && tier === "no_issues_detected") {
+      tier = "significant_concerns"; overrides.push("High-stakes claims with zero verifiable citations.");
+    }
+    // Evidence-relevance escalation: a contradicted citation is a critical signal.
+    if (contradicted.length > 0 && tier !== "critical_issues") {
+      tier = "critical_issues";
+      overrides.push("A cited abstract contradicts the claim it was used to support.");
+    } else if (unsupported.length > 0 && (tier === "no_issues_detected" || tier === "minor_concerns")) {
+      tier = "significant_concerns";
+      overrides.push("A cited source does not actually support its claim.");
+    }
+    // Low ensemble agreement is a self-consistency red flag.
+    if (a.agreement.score < 40 && tier === "no_issues_detected") {
+      tier = "minor_concerns";
+      overrides.push(a.multiModel ? "The ensemble models disagreed substantially." : "The two self-consistency passes disagreed substantially.");
+    }
   }
 
   const tierMap = {
@@ -377,6 +490,7 @@ function compose(a: {
     significant_concerns: { v: "significant" as const, b: "SIGNIFICANT CONCERNS", t: "Significant concerns" },
     minor_concerns: { v: "minor" as const, b: "MINOR CONCERNS", t: "Minor concerns" },
     no_issues_detected: { v: "no-issues" as const, b: "NO ISSUES DETECTED", t: "No critical issues detected on these specific checks" },
+    audit_incomplete: { v: "incomplete" as const, b: "AUDIT INCOMPLETE", t: "Audit incomplete" },
   };
   const tt = tierMap[tier];
 
@@ -436,9 +550,9 @@ function compose(a: {
     },
     {
       id: "risk", label: "Risk synthesis",
-      pill: tier === "critical_issues" ? "crit" : tier === "significant_concerns" ? "warn" : tier === "minor_concerns" ? "warn" : "ok",
+      pill: tier === "critical_issues" ? "crit" : tier === "significant_concerns" ? "warn" : tier === "minor_concerns" ? "warn" : tier === "audit_incomplete" ? "neut" : "ok",
       pillText: tt.b,
-      summary: a.synth?.tier_rationale || "Tier driven by citation, missing-data, and drug findings.",
+      summary: a.synth?.tier_rationale || (auditIncomplete ? "Risk synthesis did not complete, so no tier was produced." : "Tier driven by citation, missing-data, and drug findings."),
       findings: (a.synth?.top_findings || []).slice(0, 6).map((f: any) => ({
         lbl: String(f.category || "FINDING").replace(/_/g, " ").toUpperCase(),
         title: f.summary || "Finding",
@@ -483,7 +597,14 @@ function compose(a: {
 
   const factors = a.conf?.factors ?? {};
   const fScore = (k: string): number | string => factors?.[k]?.score ?? factors?.[k] ?? "n/a";
-  const confidence: number = a.conf?.overall_confidence_0_100 ?? 60;
+  let confidence: number = a.conf?.overall_confidence_0_100 ?? 60;
+  // Fix 3: a failed (or unusable) core step means the audit-of-audit confidence cannot be
+  // trusted. Force it Low (<=25) regardless of how well the steps that DID run agreed — a high
+  // ensemble agreement on claim extraction must not prop up confidence when synthesis, citation,
+  // missing-data, claim, or the confidence computation itself failed.
+  if (failedSteps.length > 0) {
+    confidence = Math.min(confidence, 25);
+  }
   const drivers: string[] = [
     "Evidence coverage: " + fScore("evidence_coverage"),
     "Citation verifiability: " + fScore("citation_verifiability"),
@@ -498,10 +619,16 @@ function compose(a: {
     drivers.push(a.diagnostics.length + " model call(s) failed: " + a.diagnostics.join("; "));
   }
   if (a.conf?.abstain_recommended && a.conf?.abstention_message) drivers.push("Abstain advised: " + a.conf.abstention_message);
+  // Fix 3: name the failed core step(s) as an explicit confidence limitation.
+  if (failedSteps.length > 0) {
+    drivers.unshift("Confidence capped Low: core step(s) failed — " + failedSteps.join(", ") + ".");
+  }
   overrides.forEach((o) => drivers.unshift("Composer override: " + o));
 
   const metaLabel: "Low" | "Moderate" | "High" = confidence >= 75 ? "High" : confidence >= 50 ? "Moderate" : "Low";
-  const reason = a.synth?.tier_rationale || (notFound.length + " unverifiable citation(s), " + missingCrit + " critical missing-data item(s).");
+  const reason = auditIncomplete
+    ? "This audit could not be completed — a required step failed or did not return a usable verdict. No verdict was produced; absence of a verdict is not approval."
+    : (a.synth?.tier_rationale || (notFound.length + " unverifiable citation(s), " + missingCrit + " critical missing-data item(s)."));
 
   return {
     verdictTier: tt.v,
