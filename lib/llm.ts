@@ -8,6 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { SYSTEM_PROMPT } from "./prompts";
+import { extractJSON } from "./json";
 
 export type Provider = "claude" | "gpt" | "gemini";
 
@@ -140,24 +141,6 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-export function extractJSON(text: string): string {
-  const trimmed = text.trim();
-  try { JSON.parse(trimmed); return trimmed; } catch {}
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) {
-    try { JSON.parse(fence[1].trim()); return fence[1].trim(); } catch {}
-  }
-  const start = text.indexOf("{");
-  if (start < 0) return trimmed;
-  let depth = 0, inStr = false, escape = false;
-  for (let i = start; i < text.length; i++) {
-    const c = text[i];
-    if (escape) { escape = false; continue; }
-    if (c === "\\") { escape = true; continue; }
-    if (c === '"') { inStr = !inStr; continue; }
-    if (inStr) continue;
-    if (c === "{") depth++;
-    else if (c === "}") { depth--; if (depth === 0) return text.slice(start, i + 1); }
-  }
-  return trimmed;
-}
+// Re-exported from ./json (single source of truth) so existing importers of
+// `extractJSON` from this module keep working.
+export { extractJSON };
