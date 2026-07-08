@@ -13,6 +13,7 @@ import { extractCitations, extractDrugCandidates, ExtractedCitation } from "./ex
 import { verifyByPmid as pubmedByPmid, verifyByCitation as pubmedByCit, PubMedResult } from "./pubmed";
 import { verifyByDoi as crByDoi, verifyByQuery as crByQuery, CrossRefResult } from "./crossref";
 import { verifyDrugName, RxNormResult } from "./rxnorm";
+import { normalizeSynthTier } from "./tier";
 
 // High-stakes claim categories: acting on one without support/verification is a safety concern.
 // Shared by evidence scoring and the zero-citation escalation so the two lists never drift.
@@ -64,22 +65,28 @@ function sanitizeForPrompt(s: string): string {
 }
 
 async function verifyOneCitation(c: ReturnType<typeof extractCitations>[number]) {
+  const none = undefined as PubMedResult | undefined;
+  const noneCr = undefined as CrossRefResult | undefined;
   if (c.pmid) {
     const pm = await pubmedByPmid(c.pmid);
-    return { raw: c.raw, pubmed: pm as PubMedResult, crossref: undefined as CrossRefResult | undefined };
+    return { raw: c.raw, pubmed: pm as PubMedResult, crossref: noneCr, unverifiable: false };
   }
   if (c.doi) {
     const cr = await crByDoi(c.doi);
-    return { raw: c.raw, pubmed: undefined as PubMedResult | undefined, crossref: cr };
+    return { raw: c.raw, pubmed: none, crossref: cr, unverifiable: false };
   }
   if (c.author && c.year) {
-    const [pm, cr] = await Promise.all([
-      pubmedByCit({ author: c.author, year: c.year, journal: c.journal, title: c.title }),
-      crByQuery({ author: c.author, year: c.year, journal: c.journal, title: c.title }),
-    ]);
-    return { raw: c.raw, pubmed: pm, crossref: cr };
+    // Without a journal, title, or volume there is nothing specific enough to CONFIRM or DENY the
+    // citation (author+year alone matches many papers). Mark it UNVERIFIABLE rather than search and
+    // report a false "NOT FOUND" — fabrication can only be asserted when we could actually look.
+    if (!c.journal && !c.title && !c.volume) {
+      return { raw: c.raw, pubmed: none, crossref: noneCr, unverifiable: true };
+    }
+    const q = { author: c.author, year: c.year, journal: c.journal, title: c.title, volume: c.volume, firstPage: c.firstPage };
+    const [pm, cr] = await Promise.all([pubmedByCit(q), crByQuery(q)]);
+    return { raw: c.raw, pubmed: pm, crossref: cr, unverifiable: false };
   }
-  return { raw: c.raw, pubmed: undefined as PubMedResult | undefined, crossref: undefined as CrossRefResult | undefined };
+  return { raw: c.raw, pubmed: none, crossref: noneCr, unverifiable: true };
 }
 
 async function verifyDrugs(text: string) {
@@ -357,7 +364,9 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
       evidence,
       missing_data: missingUsable ? missing.data : null,
       specialty_match: specialtyMatch,
-    }), { temperature: 0.2, maxTokens: 1200 }),
+      // Higher cap than the other steps: the tier + reasoning_chain + top_findings payload can be
+      // large on a complex input, and a truncated synth object would lose its tier field.
+    }), { temperature: 0.2, maxTokens: 2200 }),
     callClaudeJSON<any>(SAFE_REWRITE_PROMPT({
       input: safeShort,
       findings: null,
@@ -439,18 +448,24 @@ function compose(a: {
   durationMs: number; tokensIn: number; tokensOut: number;
 }): AuditEnvelope {
   type Tier = "critical_issues" | "significant_concerns" | "minor_concerns" | "no_issues_detected" | "audit_incomplete";
-  const SYNTH_TIERS = ["critical_issues", "significant_concerns", "minor_concerns", "no_issues_detected"];
   const overrides: string[] = [];
-  // Fix 2 (+ review hardening): a risk-synthesis step that FAILED, or that parsed to something
-  // without a recognized tier (missing / mis-cased / a mis-extracted JSON fragment), produced NO
-  // usable verdict. Treat both as AUDIT_INCOMPLETE — never default to the greenest tier, and never
-  // index tierMap with an unchecked string. The absence of a verdict is neither CRITICAL nor approval.
-  const synthTier = a.synth && typeof a.synth === "object" ? a.synth.tier : undefined;
-  const synthTierValid = typeof synthTier === "string" && SYNTH_TIERS.includes(synthTier);
-  const auditIncomplete = !a.synthOk || !synthTierValid;
-  let tier: Tier = auditIncomplete ? "audit_incomplete" : (synthTier as Tier);
+  // Fix 2 (+ review hardening): read the synth tier TOLERANTLY — accept a recognizable variant
+  // and normalize it to the canonical enum (case / spacing / short form / alternate field). A
+  // synth that FAILED, or that parsed to something with no recognizable tier at all, produced NO
+  // usable verdict -> AUDIT_INCOMPLETE (never the greenest tier, never a tierMap miss). The
+  // absence of a verdict is neither CRITICAL nor approval.
+  const rawTier = a.synth && typeof a.synth === "object"
+    ? (a.synth.tier ?? a.synth.risk_tier ?? a.synth.verdict ?? a.synth.risk_level ?? a.synth.overall_tier)
+    : undefined;
+  const normTier = normalizeSynthTier(rawTier);
+  const auditIncomplete = !a.synthOk || normTier === null;
+  let tier: Tier = a.synthOk && normTier !== null ? normTier : "audit_incomplete";
   if (auditIncomplete) {
-    overrides.push("Risk synthesis did not produce a usable verdict, so none is shown. Absence of a verdict is not approval.");
+    overrides.push(
+      a.synthOk && rawTier != null
+        ? `Risk synthesis returned an unrecognized verdict tier (${String(JSON.stringify(rawTier)).slice(0, 48)}); no verdict shown.`
+        : "Risk synthesis did not produce a usable verdict, so none is shown. Absence of a verdict is not approval."
+    );
   }
   // Steps that invalidate trust in this run (for the confidence cap + drivers). When synthesis
   // produced no usable tier but did not hard-fail, its failure is not in coreStepFailures — add it.
@@ -459,8 +474,15 @@ function compose(a: {
   // NOTE: out-of-corpus content no longer escalates the risk tier. Verification
   // (PubMed/CrossRef/RxNorm + LLM) works the same across specialties, so domain
   // alone is not a safety concern. We surface it as an informational note only.
-  const verified = a.citationVerifs.filter((v) => v.pubmed?.status === "found" || v.crossref?.status === "found");
-  const notFound = a.citationVerifs.filter((v) => (v.pubmed?.status === "not_found" || !v.pubmed) && (v.crossref?.status === "not_found" || !v.crossref));
+  const isFound = (v: typeof a.citationVerifs[number]) => v.pubmed?.status === "found" || v.crossref?.status === "found";
+  const verified = a.citationVerifs.filter(isFound);
+  // UNVERIFIABLE (author+year only): could not be confirmed OR denied — NOT a fabrication signal.
+  const unverifiableCites = a.citationVerifs.filter((v) => v.unverifiable && !isFound(v));
+  // NOT FOUND: we had enough to search (journal / title / volume) and no record matched.
+  const notFound = a.citationVerifs.filter((v) =>
+    !v.unverifiable && !isFound(v) &&
+    (v.pubmed?.status === "not_found" || !v.pubmed) && (v.crossref?.status === "not_found" || !v.crossref)
+  );
   const hasHighStakes = Array.isArray(a.claim?.claims) && a.claim.claims.some((c: any) => (HIGH_STAKES_CATEGORIES as readonly string[]).includes(c.category));
   const contradicted = a.evidence.filter((e) => e.verdict === "contradicted");
   const unsupported = a.evidence.filter((e) => e.verdict === "unsupported");
@@ -496,6 +518,7 @@ function compose(a: {
 
   const citationFindings: AuditDomain["findings"] = [
     ...notFound.map((v) => ({ lbl: "NOT FOUND", title: v.raw, src: "No record matched in PubMed or CrossRef.", sev: "critical" as const })),
+    ...unverifiableCites.map((v) => ({ lbl: "UNVERIFIABLE", title: v.raw, src: "Author + year only — not specific enough to confirm or deny. Add a journal, DOI, or PMID to verify.", sev: "contextual" as const })),
     ...verified.map((v) => {
       const pm = v.pubmed?.status === "found" ? v.pubmed : undefined;
       const cr = v.crossref?.status === "found" ? v.crossref : undefined;
@@ -532,8 +555,9 @@ function compose(a: {
   const domains: AuditDomain[] = [
     {
       id: "citations", label: "Citations", pill: citationsPill,
-      pillText: notFound.length ? notFound.length + " NOT FOUND" : verified.length ? verified.length + " VERIFIED" : "NONE FOUND",
-      summary: verified.length + " of " + a.citationVerifs.length + " citations verified deterministically against PubMed/CrossRef.",
+      pillText: notFound.length ? notFound.length + " NOT FOUND" : verified.length ? verified.length + " VERIFIED" : unverifiableCites.length ? unverifiableCites.length + " UNVERIFIABLE" : "NONE",
+      summary: verified.length + " of " + a.citationVerifs.length + " citations verified against PubMed/CrossRef"
+        + (unverifiableCites.length ? "; " + unverifiableCites.length + " unverifiable (author/year only)" : "") + ".",
       findings: citationFindings,
     },
     {
