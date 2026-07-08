@@ -379,16 +379,39 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
       citations: allVerifs.map((c) => ({ raw: c.raw, pubmed: c.pubmed?.status, crossref: c.crossref?.status })),
       evidence,
       specialty_match: specialtyMatch,
-    }), { temperature: 0.1, maxTokens: 800 }),
+      // The confidence schema is the largest (5 nested factor objects + drivers); 800 tokens can
+      // truncate it into invalid JSON, so give it room.
+    }), { temperature: 0.1, maxTokens: 1500 }),
   ]);
   if (synth.ok) accum(synth.usage);
   if (rewrite.ok) accum(rewrite.usage);
   if (conf.ok) accum(conf.usage);
 
-  // Diagnostics: capture WHY any LLM call failed so failures are visible in the
-  // UI instead of silently collapsing to safe defaults (api / parse / empty).
+  // A step is USABLE if it parsed to an object (arrays/primitives are mis-parses). Field-level
+  // shape is read leniently downstream \u2014 never reject a whole step for a missing optional field
+  // or a renamed key. (Previously confidence required a numeric `overall_confidence_0_100`, which
+  // rejected valid confidence payloads whose field was named/typed differently.)
+  const synthUsable = synth.ok && isObj(synth.data);
+  const confUsable = conf.ok && isObj(conf.data);
+
+  // TEMP diagnostic (remove once the synth/confidence shape is confirmed on the preview): log the
+  // RAW returned text/shape so it is visible in Vercel runtime logs instead of guessed at.
+  console.log("[synth-raw]", (synth as any).ok ? JSON.stringify((synth as any).data).slice(0, 1600) : "FAILED " + (synth as any).reason + ": " + ((synth as any).detail ?? ""));
+  console.log("[conf-raw]", (conf as any).ok ? JSON.stringify((conf as any).data).slice(0, 1600) : "FAILED " + (conf as any).reason + ": " + ((conf as any).detail ?? ""));
+
+  // Diagnostics: capture WHY any step is unusable. For synth/confidence, describe the PARSED shape
+  // (keys + raw tier value) too, so a "parsed-but-rejected" case is visible in the audit output \u2014
+  // not only genuine parse/api/empty failures.
   const diag = (name: string, r: { ok: boolean; reason?: string; detail?: string } | null): string | null =>
     !r || r.ok ? null : `${name}: ${r.reason}${r.detail ? " \u2014 " + r.detail.slice(0, 140) : ""}`;
+  const describe = (name: string, r: any): string => {
+    if (!r || !r.ok) return `${name}: ${(r && r.reason) || "missing"}${r && r.detail ? " \u2014 " + String(r.detail).slice(0, 120) : ""}`;
+    const d = r.data;
+    const shape = Array.isArray(d) ? "array" : d === null ? "null" : typeof d;
+    const keys = isObj(d) ? " keys=[" + Object.keys(d).slice(0, 14).join(",") + "]" : "";
+    const t = isObj(d) ? (d.tier ?? d.risk_tier ?? d.verdict ?? d.risk_level ?? d.overall_tier) : undefined;
+    return `${name}: parsed ${shape}${keys}${t !== undefined ? " tier=" + JSON.stringify(t) : ""}`;
+  };
   const diagnostics = [
     diag("claim_primary(claude)", claim),
     ...(useMultiModel
@@ -396,16 +419,12 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
       : [diag("claim_selfconsistency(claude-hot)", claimHot as any)]),
     diag("citations", citationLLM),
     diag("missing_data", missing),
-    diag("risk_synthesis", synth),
+    synthUsable ? null : describe("risk_synthesis", synth),
     diag("safe_rewrite", rewrite),
-    diag("confidence", conf),
+    confUsable ? null : describe("confidence", conf),
   ].filter((x): x is string => x !== null);
 
-  // Fix 2/3: steps whose failure must NOT read as a CRITICAL verdict and must collapse
-  // audit-of-audit confidence. Includes the foundational claim pass and the confidence
-  // computation itself (a failed confidence step must never render as a Moderate default).
-  const synthUsable = synth.ok && isObj(synth.data);
-  const confUsable = conf.ok && isObj(conf.data) && typeof conf.data.overall_confidence_0_100 === "number";
+  // Fix 2/3: steps whose failure must NOT read as a CRITICAL verdict and must collapse confidence.
   const coreStepFailures: string[] = [];
   if (!claimUsable) coreStepFailures.push("claims");
   if (!citationLLMUsable) coreStepFailures.push("citations");
@@ -454,9 +473,23 @@ function compose(a: {
   // synth that FAILED, or that parsed to something with no recognizable tier at all, produced NO
   // usable verdict -> AUDIT_INCOMPLETE (never the greenest tier, never a tierMap miss). The
   // absence of a verdict is neither CRITICAL nor approval.
-  const rawTier = a.synth && typeof a.synth === "object"
-    ? (a.synth.tier ?? a.synth.risk_tier ?? a.synth.verdict ?? a.synth.risk_level ?? a.synth.overall_tier)
-    : undefined;
+  // Pull the tier out of whatever shape the model used: a direct field, an alternate name, or a
+  // string/object nested under verdict/risk/etc. Only a genuinely tier-less synth stays incomplete.
+  const pickTierRaw = (d: any): unknown => {
+    if (!d || typeof d !== "object") return undefined;
+    const direct = d.tier ?? d.risk_tier ?? d.risk_level ?? d.overall_tier ?? d.verdict_tier;
+    if (typeof direct === "string") return direct;
+    for (const k of ["verdict", "risk", "risk_synthesis", "synthesis", "assessment", "summary"]) {
+      const v = d[k];
+      if (typeof v === "string") return v;
+      if (v && typeof v === "object") {
+        const nested = v.tier ?? v.risk_tier ?? v.level ?? v.rating;
+        if (typeof nested === "string") return nested;
+      }
+    }
+    return direct;
+  };
+  const rawTier = pickTierRaw(a.synth);
   const normTier = normalizeSynthTier(rawTier);
   const auditIncomplete = !a.synthOk || normTier === null;
   let tier: Tier = a.synthOk && normTier !== null ? normTier : "audit_incomplete";
@@ -621,7 +654,13 @@ function compose(a: {
 
   const factors = a.conf?.factors ?? {};
   const fScore = (k: string): number | string => factors?.[k]?.score ?? factors?.[k] ?? "n/a";
-  let confidence: number = a.conf?.overall_confidence_0_100 ?? 60;
+  // Read the overall confidence leniently — accept a number or numeric string under any of a few
+  // plausible field names; fall back to a neutral 60 only when none is present.
+  const confRaw = a.conf && typeof a.conf === "object"
+    ? (a.conf.overall_confidence_0_100 ?? a.conf.overall_confidence ?? a.conf.confidence_0_100 ?? a.conf.confidence)
+    : undefined;
+  const confNum = typeof confRaw === "number" ? confRaw : typeof confRaw === "string" ? Number(confRaw) : NaN;
+  let confidence: number = Number.isFinite(confNum) ? Math.max(0, Math.min(100, confNum)) : 60;
   // Fix 3: a failed (or unusable) core step means the audit-of-audit confidence cannot be
   // trusted. Force it Low (<=25) regardless of how well the steps that DID run agreed — a high
   // ensemble agreement on claim extraction must not prop up confidence when synthesis, citation,
