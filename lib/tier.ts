@@ -1,17 +1,24 @@
-// lib/tier.ts — normalize the risk-synthesis tier onto the canonical enum.
+// lib/tier.ts — normalize the risk-synthesis tier onto the canonical enum + severity helpers.
 //
-// The synth LLM is instructed to return one of the four exact strings below, but Haiku
-// occasionally returns a recognizable variant (different case/spacing, a short form like
-// "critical", or an alternate field name). A strict equality check treats those as a failed
-// step and forces AUDIT_INCOMPLETE on every audit — so read the tier tolerantly, but return
-// null (-> honest AUDIT_INCOMPLETE) when NO clinical tier is recognizable, and only map to the
-// greenest tier on an explicit "no issues / no concern / no critical" signal so a malformed
-// synth can never read as approval.
+// The synth LLM is instructed to return one of the four exact strings below, but the models
+// occasionally return a recognizable variant (different case/spacing, a short form like
+// "critical", or an alternate/nested field name). A strict equality check treats those as a failed
+// step and forces AUDIT_INCOMPLETE — so read the tier tolerantly, but return null (-> honest
+// AUDIT_INCOMPLETE) when NO clinical tier is recognizable, and only map to the greenest tier on an
+// explicit "no issues / no concern / no critical" signal so a malformed synth can't read as approval.
 export type SynthTier =
   | "critical_issues"
   | "significant_concerns"
   | "minor_concerns"
   | "no_issues_detected";
+
+// Higher = more severe / more conservative for a safety auditor (used by the fail-closed vote).
+export const TIER_SEVERITY: Record<SynthTier, number> = {
+  no_issues_detected: 0,
+  minor_concerns: 1,
+  significant_concerns: 2,
+  critical_issues: 3,
+};
 
 export function normalizeSynthTier(raw: unknown): SynthTier | null {
   if (typeof raw !== "string") return null;
@@ -24,4 +31,26 @@ export function normalizeSynthTier(raw: unknown): SynthTier | null {
   if (s.includes("significant")) return "significant_concerns";
   if (s.includes("minor")) return "minor_concerns";
   return null;
+}
+
+// Pull the tier out of whatever shape a model used: a direct field, an alternate name, or a
+// string/object nested under verdict/risk/etc. Returns the RAW value (string or undefined) for
+// normalizeSynthTier to map. Shared by the risk-synthesis composer and the ensemble tier vote.
+export function pickTierRaw(d: any): unknown {
+  if (!d || typeof d !== "object") return undefined;
+  const direct = d.tier ?? d.risk_tier ?? d.risk_level ?? d.overall_tier ?? d.verdict_tier;
+  if (typeof direct === "string") return direct;
+  for (const k of ["verdict", "risk", "risk_synthesis", "synthesis", "assessment", "summary"]) {
+    const v = d[k];
+    if (typeof v === "string") return v;
+    if (v && typeof v === "object") {
+      const nested = v.tier ?? v.risk_tier ?? v.level ?? v.rating;
+      if (typeof nested === "string") return nested;
+    }
+  }
+  return direct;
+}
+
+export function tierFromSynth(data: any): SynthTier | null {
+  return normalizeSynthTier(pickTierRaw(data));
 }

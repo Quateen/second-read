@@ -16,16 +16,21 @@ export type LLMJsonResult<T> =
   | { ok: true; provider: Provider; data: T; usage: { input_tokens: number; output_tokens: number } }
   | { ok: false; provider: Provider; reason: "parse" | "api" | "empty" | "no_key"; detail?: string };
 
+// Gemini's key is read from GOOGLE_API_KEY (the name set in Vercel) with GEMINI_API_KEY as a
+// backward-compatible fallback — otherwise the provider stays dormant and the ensemble silently
+// runs at 2 models instead of 3.
+const GOOGLE_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+
 const MODELS: Record<Provider, string> = {
   claude: process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001",
   gpt: process.env.OPENAI_MODEL || "gpt-4o-mini",
-  gemini: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+  gemini: process.env.GEMINI_MODEL || process.env.GOOGLE_MODEL || "gemini-1.5-flash",
 };
 
 export function isProviderAvailable(p: Provider): boolean {
   if (p === "claude") return !!process.env.ANTHROPIC_API_KEY;
   if (p === "gpt") return !!process.env.OPENAI_API_KEY;
-  if (p === "gemini") return !!process.env.GEMINI_API_KEY;
+  if (p === "gemini") return !!GOOGLE_KEY;
   return false;
 }
 
@@ -48,7 +53,7 @@ function openai(): OpenAI {
   return _openai;
 }
 function gemini(): GoogleGenerativeAI {
-  if (!_gemini) _gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+  if (!_gemini) _gemini = new GoogleGenerativeAI(GOOGLE_KEY!);
   return _gemini;
 }
 

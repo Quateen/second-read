@@ -13,7 +13,8 @@ import { extractCitations, extractDrugCandidates, ExtractedCitation } from "./ex
 import { verifyByPmid as pubmedByPmid, verifyByCitation as pubmedByCit, PubMedResult } from "./pubmed";
 import { verifyByDoi as crByDoi, verifyByQuery as crByQuery, CrossRefResult } from "./crossref";
 import { verifyDrugName, RxNormResult } from "./rxnorm";
-import { normalizeSynthTier } from "./tier";
+import { tierFromSynth, SynthTier } from "./tier";
+import { runQuorum, decideFinalTier, agreementMode, TierVote, AgreementMode } from "./ensemble";
 
 // High-stakes claim categories: acting on one without support/verification is a safety concern.
 // Shared by evidence scoring and the zero-citation escalation so the two lists never drift.
@@ -28,6 +29,16 @@ export type AuditDomain = {
   findings: Array<{ lbl: string; title: string; src: string; sev: "critical" | "important" | "contextual" }>;
 };
 
+// One event in the "orchestration theater" stream — every event reflects a REAL pipeline action.
+export type AuditEvent = {
+  ts: number;                       // ms since audit start
+  kind: "step" | "voter" | "verifier" | "finding" | "verdict";
+  actor: string;                    // orchestrator | claude | gpt | gemini | pubmed | crossref | rxnorm | ...
+  status: string;                   // start | ok | fail | flag | cleared | noted | vote:<tier>
+  detail: string;
+  findingId?: string;
+};
+
 export type AuditEnvelope = {
   verdictTier: "no-issues" | "minor" | "significant" | "critical" | "incomplete";
   verdictTitle: string;
@@ -36,6 +47,12 @@ export type AuditEnvelope = {
   metaConfidence: number;
   metaLabel: "Low" | "Moderate" | "High";
   metaDrivers: string[];
+  // Ensemble disclosure (truthful): the real mode + per-provider tier votes + fail-closed flags.
+  agreementMode: AgreementMode;
+  disagreement: boolean;
+  humanReviewFlag: boolean;
+  tierVotes: TierVote[];
+  events: AuditEvent[];
   domains: AuditDomain[];
   rewrite: string;
   diagnostics: {
@@ -271,6 +288,13 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   let tokensOut = 0;
   const accum = (u: { input_tokens: number; output_tokens: number }) => { tokensIn += u.input_tokens; tokensOut += u.output_tokens; };
 
+  // Orchestration-theater event stream (Part B). Every event reflects a REAL pipeline action;
+  // the client replays them. Nothing here is decorative — a problem never "animates away".
+  const events: AuditEvent[] = [];
+  const emit = (kind: AuditEvent["kind"], actor: string, status: string, detail: string, findingId?: string) =>
+    events.push({ ts: Date.now() - t0, kind, actor, status, detail, findingId });
+  emit("step", "orchestrator", "start", "Audit started");
+
   const safe = sanitizeForPrompt(input);
   const safeShort = safe.slice(0, 8000);
   // Bound the regex citation pass to a fixed slice so it stays linear regardless of the
@@ -306,10 +330,14 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   // extractJSON can salvage a stray array/fragment from noncompliant output; such a payload must
   // count as a FAILED step (cap confidence, don't silently disable a downstream safety check),
   // never be trusted just because JSON.parse succeeded.
+  // A step is usable if it parsed to an OBJECT (arrays/primitives are mis-parses, still rejected by
+  // isObj). The specific list fields (claims / citations / missing_items) are read leniently
+  // downstream via `?? []`, so a normal payload isn't rejected just because a list is named/typed
+  // differently — this is the same lenient shape-guard applied to synth/confidence (A5).
   const isObj = (x: any): boolean => x != null && typeof x === "object" && !Array.isArray(x);
-  const claimUsable = claim.ok && isObj(claim.data) && Array.isArray(claim.data.claims);
-  const citationLLMUsable = citationLLM.ok && isObj(citationLLM.data) && Array.isArray(citationLLM.data.citations);
-  const missingUsable = missing.ok && isObj(missing.data) && Array.isArray(missing.data.missing_items);
+  const claimUsable = claim.ok && isObj(claim.data);
+  const citationLLMUsable = citationLLM.ok && isObj(citationLLM.data);
+  const missingUsable = missing.ok && isObj(missing.data);
 
   const passA = claimUsable ? claim.data : null;
 
@@ -324,6 +352,26 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
     ? await Promise.all(netNewCitations.map(verifyOneCitation))
     : [];
   const allVerifs = [...citationVerifs, ...extraVerifs];
+
+  // Emit REAL deterministic-verification events for the theater. These reflect the actual
+  // PubMed/CrossRef/RxNorm outcomes — a flagged finding is never later "cleared" (honesty guard).
+  allVerifs.forEach((v, i) => {
+    const fid = "cit:" + i;
+    const found = v.pubmed?.status === "found" || v.crossref?.status === "found";
+    emit("finding", "orchestrator", "checking", v.raw.slice(0, 90), fid);
+    if (v.pubmed?.status) emit("verifier", "pubmed", v.pubmed.status === "found" ? "ok" : "fail", v.raw.slice(0, 60), fid);
+    if (v.crossref?.status) emit("verifier", "crossref", v.crossref.status === "found" ? "ok" : "fail", v.raw.slice(0, 60), fid);
+    // "flag" only on a genuine not_found from a reachable DB; a transient error is "noted", not fabrication.
+    const hasNotFound = v.pubmed?.status === "not_found" || v.crossref?.status === "not_found";
+    emit("finding", "orchestrator", found ? "cleared" : v.unverifiable ? "noted" : hasNotFound ? "flag" : "noted", v.raw.slice(0, 90), fid);
+  });
+  drugVerifs.forEach((d) => {
+    const fid = "drug:" + d.name;
+    emit("finding", "orchestrator", "checking", d.name, fid);
+    emit("verifier", "rxnorm", d.r.status === "found" ? "ok" : "fail",
+      d.name + (d.r.status === "found" ? " → rxcui " + (d.r as any).rxcui : ""), fid);
+    emit("finding", "orchestrator", d.r.status === "found" ? "cleared" : d.r.status === "not_found" ? "flag" : "noted", d.name, fid);
+  });
 
   // Build the ensemble pass list.
   const PROVIDER_LABEL: Record<string, string> = { claude: "Claude", gpt: "GPT-4o-mini", gemini: "Gemini", "claude-hot": "Claude (temp 0.7)" };
@@ -349,24 +397,26 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
     ? { ...(claim.data as any).specialty_match, confidence_0_100: 75 }
     : { in_corpus: opts.specialty !== "other", confidence_0_100: 75 };
 
-  const [synth, rewrite, conf] = await Promise.all([
-    callClaudeJSON<any>(RISK_SYNTHESIS_PROMPT({
-      input: safeShort.slice(0, 4000),
-      claims: claimUsable ? claim.data : null,
-      citations: {
-        llm: citationLLMUsable ? citationLLM.data : null,
-        verification: allVerifs.map((c) => ({
-          raw: c.raw,
-          pubmed: c.pubmed?.status,
-          crossref: c.crossref?.status,
-        })),
-      },
-      evidence,
-      missing_data: missingUsable ? missing.data : null,
-      specialty_match: specialtyMatch,
-      // Higher cap than the other steps: the tier + reasoning_chain + top_findings payload can be
-      // large on a complex input, and a truncated synth object would lose its tier field.
-    }), { temperature: 0.2, maxTokens: 2200 }),
+  const synthPrompt = RISK_SYNTHESIS_PROMPT({
+    input: safeShort.slice(0, 4000),
+    claims: claimUsable ? claim.data : null,
+    citations: {
+      llm: citationLLMUsable ? citationLLM.data : null,
+      verification: allVerifs.map((c) => ({ raw: c.raw, pubmed: c.pubmed?.status, crossref: c.crossref?.status })),
+    },
+    evidence,
+    missing_data: missingUsable ? missing.data : null,
+    specialty_match: specialtyMatch,
+  });
+  // A2/A3: the risk TIER is a categorical vote across every configured provider (Claude + GPT +
+  // Gemini when their keys are set), run failsafe — parallel, per-call timeout + retry, quorum
+  // timeout, circuit breaker. Rewrite + confidence stay single-voice Claude calls, in parallel.
+  emit("voter", "orchestrator", "start", `risk-tier vote across ${providers.join("+")}`);
+  const [synthQuorum, rewrite, conf] = await Promise.all([
+    runQuorum<any>(providers, (p) => {
+      emit("voter", p, "start", "risk_synthesis");
+      return callLLMJSON<any>(p, synthPrompt, { temperature: 0.2, maxTokens: 2200 });
+    }, { perCallTimeoutMs: 20000, quorumTimeoutMs: 14000 }),
     callClaudeJSON<any>(SAFE_REWRITE_PROMPT({
       input: safeShort,
       findings: null,
@@ -383,9 +433,31 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
       // truncate it into invalid JSON, so give it room.
     }), { temperature: 0.1, maxTokens: 1500 }),
   ]);
-  if (synth.ok) accum(synth.usage);
   if (rewrite.ok) accum(rewrite.usage);
   if (conf.ok) accum(conf.usage);
+
+  // Primary synth (rationale/findings) = Claude's vote, else the first provider that returned.
+  const synthResults = synthQuorum.results;
+  const primarySynthData = synthResults.find((r) => r.provider === "claude" && r.ok && isObj(r.data))?.data
+    ?? synthResults.find((r) => r.ok && isObj(r.data))?.data ?? null;
+  const synth: { ok: boolean; data: any; reason?: string } = primarySynthData
+    ? { ok: true, data: primarySynthData }
+    : { ok: false, data: null, reason: synthResults.find((r) => !r.ok)?.reason ?? "empty" };
+  // Per-provider tier votes (normalized) + the truthful agreement mode + fail-closed decision.
+  const tierVotes: TierVote[] = synthResults.map((r) => {
+    const tier = r.ok ? tierFromSynth(r.data) : null;
+    emit("voter", r.provider, r.ok ? (tier ? `vote:${tier}` : "flag") : "fail", tier ?? r.reason ?? "");
+    return { provider: r.provider, ok: r.ok, tier };
+  });
+  const synthOkCount = synthResults.filter((r) => r.ok).length;
+  const ensembleMode: AgreementMode = agreementMode(synthOkCount, useMultiModel);
+  // Green needs POSITIVE deterministic corroboration: every citation with content to check must be
+  // FOUND (an ERRORED or not_found check does NOT corroborate — a transient PubMed/CrossRef outage
+  // must not let a green through), and every drug candidate must resolve in RxNorm.
+  const anyUnresolvedCitation = allVerifs.some((v) =>
+    !v.unverifiable && !(v.pubmed?.status === "found" || v.crossref?.status === "found"));
+  const anyDrugUnresolved = drugVerifs.some((d) => d.r.status !== "found");
+  const tierDecision = decideFinalTier(tierVotes, !anyUnresolvedCitation && !anyDrugUnresolved, providers.length);
 
   // A step is USABLE if it parsed to an object (arrays/primitives are mis-parses). Field-level
   // shape is read leniently downstream \u2014 never reject a whole step for a missing optional field
@@ -393,11 +465,6 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   // rejected valid confidence payloads whose field was named/typed differently.)
   const synthUsable = synth.ok && isObj(synth.data);
   const confUsable = conf.ok && isObj(conf.data);
-
-  // TEMP diagnostic (remove once the synth/confidence shape is confirmed on the preview): log the
-  // RAW returned text/shape so it is visible in Vercel runtime logs instead of guessed at.
-  console.log("[synth-raw]", (synth as any).ok ? JSON.stringify((synth as any).data).slice(0, 1600) : "FAILED " + (synth as any).reason + ": " + ((synth as any).detail ?? ""));
-  console.log("[conf-raw]", (conf as any).ok ? JSON.stringify((conf as any).data).slice(0, 1600) : "FAILED " + (conf as any).reason + ": " + ((conf as any).detail ?? ""));
 
   // Diagnostics: capture WHY any step is unusable. For synth/confidence, describe the PARSED shape
   // (keys + raw tier value) too, so a "parsed-but-rejected" case is visible in the audit output \u2014
@@ -432,7 +499,7 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   if (!synthUsable) coreStepFailures.push("risk_synthesis");
   if (!confUsable) coreStepFailures.push("confidence");
 
-  return compose({
+  const env = compose({
     diagnostics,
     coreStepFailures,
     multiModel: useMultiModel,
@@ -448,10 +515,18 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
     specialtyMatch,
     agreement,
     evidence,
+    votedTier: tierDecision.tier,
+    disagreement: tierDecision.disagreement,
+    humanReviewFlag: tierDecision.humanReviewFlag,
+    agreementMode: ensembleMode,
+    tierVotes,
+    events,
     durationMs: Date.now() - t0,
     tokensIn,
     tokensOut,
   });
+  emit("verdict", "orchestrator", env.verdictTier, env.verdictBadge);
+  return env;
 }
 
 function compose(a: {
@@ -464,41 +539,28 @@ function compose(a: {
   claim: any; specialtyMatch: { in_corpus: boolean; confidence_0_100: number };
   agreement: { score: number; notes: string[]; passes: EnsemblePass[] };
   evidence: EvidenceVerdict[];
+  votedTier: SynthTier | null;
+  disagreement: boolean;
+  humanReviewFlag: boolean;
+  agreementMode: AgreementMode;
+  tierVotes: TierVote[];
+  events: AuditEvent[];
   durationMs: number; tokensIn: number; tokensOut: number;
 }): AuditEnvelope {
   type Tier = "critical_issues" | "significant_concerns" | "minor_concerns" | "no_issues_detected" | "audit_incomplete";
   const overrides: string[] = [];
-  // Fix 2 (+ review hardening): read the synth tier TOLERANTLY — accept a recognizable variant
-  // and normalize it to the canonical enum (case / spacing / short form / alternate field). A
-  // synth that FAILED, or that parsed to something with no recognizable tier at all, produced NO
-  // usable verdict -> AUDIT_INCOMPLETE (never the greenest tier, never a tierMap miss). The
-  // absence of a verdict is neither CRITICAL nor approval.
-  // Pull the tier out of whatever shape the model used: a direct field, an alternate name, or a
-  // string/object nested under verdict/risk/etc. Only a genuinely tier-less synth stays incomplete.
-  const pickTierRaw = (d: any): unknown => {
-    if (!d || typeof d !== "object") return undefined;
-    const direct = d.tier ?? d.risk_tier ?? d.risk_level ?? d.overall_tier ?? d.verdict_tier;
-    if (typeof direct === "string") return direct;
-    for (const k of ["verdict", "risk", "risk_synthesis", "synthesis", "assessment", "summary"]) {
-      const v = d[k];
-      if (typeof v === "string") return v;
-      if (v && typeof v === "object") {
-        const nested = v.tier ?? v.risk_tier ?? v.level ?? v.rating;
-        if (typeof nested === "string") return nested;
-      }
-    }
-    return direct;
-  };
-  const rawTier = pickTierRaw(a.synth);
-  const normTier = normalizeSynthTier(rawTier);
-  const auditIncomplete = !a.synthOk || normTier === null;
-  let tier: Tier = a.synthOk && normTier !== null ? normTier : "audit_incomplete";
+  // A2/A3 (fail-closed ensemble): the tier is a CROSS-MODEL VOTE decided in runAudit — GREEN
+  // requires unanimity + deterministic corroboration; any disagreement or a 2-of-3-only quorum
+  // downgrades to the more conservative tier and flags for human review. A null vote means no model
+  // produced a usable tier -> AUDIT_INCOMPLETE (never the greenest tier, never a tierMap miss;
+  // absence of a verdict is neither CRITICAL nor approval). Deterministic escalations below can only
+  // raise severity further.
+  const auditIncomplete = a.votedTier === null;
+  let tier: Tier = a.votedTier !== null ? a.votedTier : "audit_incomplete";
   if (auditIncomplete) {
-    overrides.push(
-      a.synthOk && rawTier != null
-        ? `Risk synthesis returned an unrecognized verdict tier (${String(JSON.stringify(rawTier)).slice(0, 48)}); no verdict shown.`
-        : "Risk synthesis did not produce a usable verdict, so none is shown. Absence of a verdict is not approval."
-    );
+    overrides.push("Risk synthesis did not produce a usable verdict, so none is shown. Absence of a verdict is not approval.");
+  } else if (a.disagreement) {
+    overrides.push("Voters disagreed on the tier — took the more conservative tier and flagged for human review.");
   }
   // Steps that invalidate trust in this run (for the confidence cap + drivers). When synthesis
   // produced no usable tier but did not hard-fail, its failure is not in coreStepFailures — add it.
@@ -668,11 +730,15 @@ function compose(a: {
   if (failedSteps.length > 0) {
     confidence = Math.min(confidence, 25);
   }
+  const modeLabel = a.agreementMode === "ensemble:3" ? "3-model ensemble"
+    : a.agreementMode === "ensemble:2" ? "2-model ensemble" : "Claude self-consistency";
   const drivers: string[] = [
     "Evidence coverage: " + fScore("evidence_coverage"),
     "Citation verifiability: " + fScore("citation_verifiability"),
-    "Ensemble agreement: " + a.agreement.score + "%",
+    "Model agreement: " + modeLabel + " (" + a.agreement.score + "%)",
   ];
+  // A3/A4: surface the fail-closed human-review flag and any voter disagreement prominently.
+  if (a.humanReviewFlag) drivers.unshift("Human review recommended — voter disagreement or an incomplete (2-of-3) quorum.");
   // Specialty is shown as a neutral context note, never as a confidence penalty.
   if (!a.specialtyMatch.in_corpus) drivers.push("Specialty: outside neuro/spine corpus (informational; does not lower confidence).");
   if (contradicted.length) drivers.push(contradicted.length + " cited abstract(s) contradict their claim.");
@@ -701,6 +767,11 @@ function compose(a: {
     metaConfidence: confidence,
     metaLabel,
     metaDrivers: drivers.slice(0, 6),
+    agreementMode: a.agreementMode,
+    disagreement: a.disagreement,
+    humanReviewFlag: a.humanReviewFlag,
+    tierVotes: a.tierVotes,
+    events: a.events,
     domains,
     rewrite: a.rewriteOk && a.rewrite?.rewritten_text
       ? a.rewrite.rewritten_text
