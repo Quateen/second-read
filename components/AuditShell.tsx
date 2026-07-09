@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import AuditTheater, { TheaterEvent, TheaterVote } from "./AuditTheater";
 
 type Finding = { lbl: string; title: string; src: string; sev: "critical" | "important" | "contextual" };
 type Domain = { id: string; label: string; pill: "ok" | "warn" | "crit" | "neut"; pillText: string; summary: string; findings: Finding[] };
@@ -11,6 +12,11 @@ export type Audit = {
   metaConfidence: number;
   metaLabel: "Low" | "Moderate" | "High";
   metaDrivers: string[];
+  agreementMode?: string;
+  disagreement?: boolean;
+  humanReviewFlag?: boolean;
+  tierVotes?: TheaterVote[];
+  events?: TheaterEvent[];
   domains: Domain[];
   rewrite: string;
   diagnostics?: { durationMs: number; tokensIn: number; tokensOut: number; costEstimateUsd: number; citationsChecked: number; citationsVerified: number; citationsNotFound: number; drugsChecked: number; drugsVerified: number; llmFailures?: string[] };
@@ -225,6 +231,15 @@ export default function AuditShell() {
               </ul>
             </div>
           </div>
+
+          {audit.events && audit.events.length > 0 && (
+            <AuditTheater
+              events={audit.events}
+              tierVotes={audit.tierVotes ?? []}
+              agreementMode={audit.agreementMode ?? "self_consistency:claude"}
+              humanReviewFlag={!!audit.humanReviewFlag}
+            />
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 mt-4">
             {audit.domains.map((d) => (
