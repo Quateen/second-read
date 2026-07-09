@@ -58,8 +58,10 @@ export default function HomePage() {
           <div className="border-l-2 border-ink pl-3.5 py-1.5">
             <span className="serif text-[30px] font-semibold block">Model agreement</span>
             <span className="text-muted text-[13px]">
-              Two independent Claude passes at different temperatures are compared for self-consistency, producing an
-              explicit agreement score. A true Claude+GPT+Gemini ensemble is the next step on the roadmap.
+              Claude, GPT, and Gemini each audit the content independently and vote on the risk tier, producing an
+              explicit cross-model agreement score. When the models disagree, the audit takes the more conservative
+              verdict and flags for human review. If a provider is unavailable, it degrades honestly to a two-model
+              vote or Claude self-consistency — and says which.
             </span>
           </div>
         </div>

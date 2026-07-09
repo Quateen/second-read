@@ -73,3 +73,22 @@ export async function consume(ip: string): Promise<RateResult> {
     return consumeMemory(ip);
   }
 }
+
+// --- Light feedback limiter ------------------------------------------------
+// Feedback abuse is low-severity, so this is a deliberately simple per-instance in-memory limiter
+// (KV-free — no round-trip per thumbs). It uses a SEPARATE bucket from the audit limiter so leaving
+// feedback never consumes a user's daily audit quota.
+const fbBuckets = new Map<string, { count: number; resetAt: number }>();
+const FEEDBACK_LIMIT = Number(process.env.FEEDBACK_LIMIT_PER_DAY || 60);
+export function consumeFeedback(ip: string): { ok: boolean } {
+  const now = Date.now();
+  const dayMs = DAY_SECONDS * 1000;
+  const b = fbBuckets.get(ip);
+  if (!b || b.resetAt < now) {
+    fbBuckets.set(ip, { count: 1, resetAt: now + dayMs });
+    return { ok: true };
+  }
+  if (b.count >= FEEDBACK_LIMIT) return { ok: false };
+  b.count += 1;
+  return { ok: true };
+}

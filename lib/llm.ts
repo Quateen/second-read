@@ -6,7 +6,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
 import { SYSTEM_PROMPT } from "./prompts";
 import { extractJSON, parseJSONLoose } from "./json";
 
@@ -55,6 +55,35 @@ function openai(): OpenAI {
 function gemini(): GoogleGenerativeAI {
   if (!_gemini) _gemini = new GoogleGenerativeAI(GOOGLE_KEY!);
   return _gemini;
+}
+
+// Gemini's safety filters otherwise block legitimate CLINICAL content (drug names, doses,
+// procedures) under HARM_CATEGORY_DANGEROUS_CONTENT — silently dropping Gemini's vote so the
+// ensemble runs at 2 models. This is an education-only clinical-AI auditor that MUST be able to read
+// medical text, so the categories are set to BLOCK_NONE. (Fail-closed lives downstream in the tier
+// vote, not here — Gemini refusing to read a drug name is a reliability bug, not a safety feature.)
+const GEMINI_SAFETY = [
+  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+];
+
+// Extract text from a Gemini response WITHOUT throwing. The SDK's response.text() throws a
+// GoogleGenerativeAIResponseError when the candidate was blocked / finished on SAFETY / has no text
+// part — which previously surfaced as an "api" error and dropped Gemini's vote. Read it defensively:
+// try text(), then fall back to joining candidate parts, then return "" (-> a retryable "empty").
+function geminiText(res: any): string {
+  try {
+    const t = res?.response?.text?.();
+    if (typeof t === "string" && t.trim()) return t;
+  } catch { /* blocked / no-text candidate — fall through to manual extraction */ }
+  const parts = res?.response?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    const joined = parts.map((p: any) => (typeof p?.text === "string" ? p.text : "")).join("");
+    if (joined.trim()) return joined;
+  }
+  return "";
 }
 
 type CallOpts = {
@@ -111,11 +140,15 @@ export async function callLLMJSON<T = unknown>(
     const model = gemini().getGenerativeModel({
       model: MODELS.gemini,
       systemInstruction: system,
+      safetySettings: GEMINI_SAFETY,
+      // maxOutputTokens tracks the caller's maxTokens (the synth vote passes 3500, matching Claude's
+      // synth cap) so a long tier rationale is not truncated mid-JSON. responseMimeType forces the
+      // decoder into JSON mode; extractJSON + parseJSONLoose + the retry below still guard the parse.
       generationConfig: { temperature, maxOutputTokens: maxTokens, responseMimeType: "application/json" },
     });
     const res = await withTimeout(model.generateContent(prompt), timeoutMs);
-    const text = res.response.text();
-    const um = res.response.usageMetadata;
+    const text = geminiText(res);
+    const um = res.response?.usageMetadata;
     return { text, usage: { input_tokens: um?.promptTokenCount ?? 0, output_tokens: um?.candidatesTokenCount ?? 0 } };
   };
 
@@ -135,8 +168,15 @@ export async function callLLMJSON<T = unknown>(
   };
 
   const first = await attempt();
-  if (first.ok || first.reason !== "parse" || !retryOnParse) return first;
-  return attempt("Your previous response failed to parse as JSON. Return STRICT valid JSON only.");
+  // Retry once on a parse failure OR an empty/blocked response — both are commonly transient (a
+  // truncated JSON, a momentary empty Gemini candidate). "api"/"no_key" are NOT retried here: a
+  // retry would not fit inside the quorum window and cannot fix an auth/outage problem.
+  const retryable = !first.ok && (first.reason === "parse" || first.reason === "empty");
+  if (first.ok || !retryable || !retryOnParse) return first;
+  const nudge = !first.ok && first.reason === "empty"
+    ? "Your previous response was empty. Return the requested STRICT valid JSON now, with no preamble."
+    : "Your previous response failed to parse as JSON. Return STRICT valid JSON only.";
+  return attempt(nudge);
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

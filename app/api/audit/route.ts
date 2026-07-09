@@ -10,7 +10,10 @@ export const maxDuration = 60;
 const MAX_INPUT_CHARS = Number(process.env.MAX_AUDIT_INPUT_CHARS || 10000);
 const BodySchema = z.object({
   input: z.string().min(20).max(MAX_INPUT_CHARS),
-  specialty: z.enum(["neuro", "other"]).default("neuro"),
+  // Optional and inert: the UI no longer collects a specialty. It is accepted for API
+  // back-compat but does NOT affect scoring — verification (PubMed/CrossRef/RxNorm) is
+  // specialty-agnostic, and specialty_match is informational only. See runAudit.
+  specialty: z.string().max(60).optional(),
 });
 
 function getIp(req: NextRequest): string {

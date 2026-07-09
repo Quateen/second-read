@@ -114,6 +114,19 @@ export default function AuditTheater({ events, tierVotes, agreementMode, humanRe
   const tokensShown = tokensTotal != null ? Math.round(tokensTotal * (done ? 1 : progress)) : null;
   const costShown = costUsd != null ? costUsd * (done ? 1 : progress) : null;
 
+  // Consensus gauge (P5): fills as REAL votes land. Segments are NEUTRAL ink (they show only that a
+  // vote arrived, never whether it was "good") — a flagged/critical vote never renders green here,
+  // and the outcome is stated in words so color is never the only signal.
+  const settledCount = voters.filter((v) => settledVoters.has(v.provider) || done).length;
+  const castTiers = voters.map((v) => (v as any).tier as string | null).filter((t): t is string => !!t);
+  const uniqueTiers = Array.from(new Set(castTiers));
+  const allVotesIn = voters.length > 0 && settledCount >= voters.length;
+  const consensusText = !voters.length ? ""
+    : !allVotesIn ? "Tallying votes…"
+    : castTiers.length === 0 ? "No usable votes — see the verdict above."
+    : uniqueTiers.length === 1 ? "Unanimous vote: " + (TIER_TEXT[uniqueTiers[0]] ?? uniqueTiers[0])
+    : "Split vote — most conservative tier taken" + (humanReviewFlag ? "; human review recommended" : "");
+
   return (
     <div className="border border-line rounded bg-white p-4 mt-4" aria-label="Audit orchestration">
       {/* Orchestrator bar */}
@@ -138,6 +151,33 @@ export default function AuditTheater({ events, tierVotes, agreementMode, humanRe
       <div className="h-[4px] bg-[#e0ddd4] overflow-hidden rounded mb-4">
         <div className={"h-full bg-ink transition-all duration-300 " + (!done && !reduced ? "animate-pulse" : "")} style={{ width: pct + "%" }} />
       </div>
+
+      {/* Consensus gauge — one segment per real voter, filling as each vote lands */}
+      {voters.length > 0 && (
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] text-muted uppercase tracking-[.06em]">Consensus</span>
+            <span className="mono text-[11px] text-muted">{settledCount}/{voters.length} voted</span>
+          </div>
+          <div className="flex gap-1" role="img" aria-label={"Consensus: " + settledCount + " of " + voters.length + " models voted. " + consensusText}>
+            {voters.map((v, i) => {
+              const settled = settledVoters.has(v.provider) || done;
+              const voted = !!((v as any).tier);
+              const active = activeActors.has(v.provider) && !settled && !reduced && !done;
+              const bg = settled ? (voted ? "bg-ink" : "bg-[#cfc9bb]") : "bg-[#e7e4da]";
+              const tierT = (v as any).tier ? (TIER_TEXT[(v as any).tier] ?? (v as any).tier) : null;
+              return (
+                <div
+                  key={v.provider + i}
+                  title={(VOTER_META[v.provider] ?? v.provider) + ": " + (settled ? (voted ? "voted " + tierT : "no vote") : "pending")}
+                  className={"h-2 flex-1 rounded-full transition-all duration-500 " + bg + " " + (active ? "animate-pulse" : "")}
+                />
+              );
+            })}
+          </div>
+          <div className="text-[11.5px] text-ink-soft mt-1.5">{consensusText}</div>
+        </div>
+      )}
 
       {/* Voter + verifier lanes */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">

@@ -73,3 +73,65 @@ export function pickTierRaw(d: any): unknown {
 export function tierFromSynth(data: any): SynthTier | null {
   return normalizeSynthTier(pickTierRaw(data));
 }
+
+// The composer's tier universe adds AUDIT_INCOMPLETE (no usable vote) to the four synth tiers.
+export type ComposeTier = SynthTier | "audit_incomplete";
+
+// Pure tier resolution: the cross-model vote (votedTier) + the deterministic signals -> the final
+// tier and its human-readable override reasons. Kept here (SDK-free) so the calibration is
+// unit-testable WITHOUT invoking any LLM. Escalations can only RAISE severity, never lower it, and
+// never turn an incomplete audit into a colored tier. Fail-closed is preserved: an unverifiable
+// high-stakes claim can never stay green — but a plain MISSING citation floors at MINOR, not
+// SIGNIFICANT (P2 calibration: absence of a citation is not, by itself, a significant problem;
+// a real risk driver — fabricated/contradicted citation, drug-safety, critical missing-data — is).
+export function escalateTier(sig: {
+  votedTier: SynthTier | null;
+  disagreement: boolean;
+  hasHighStakes: boolean;
+  verifiedCount: number;      // citations positively FOUND in PubMed/CrossRef
+  citationCount: number;      // total citations that were submitted for verification
+  contradictedCount: number;  // cited abstracts that contradict the claim they support
+  unsupportedCount: number;   // cited sources that do not support their claim
+  agreementScore: number;     // 0-100 ensemble / self-consistency agreement
+  multiModel: boolean;
+}): { tier: ComposeTier; overrides: string[] } {
+  const overrides: string[] = [];
+  const auditIncomplete = sig.votedTier === null;
+  let tier: ComposeTier = sig.votedTier !== null ? sig.votedTier : "audit_incomplete";
+  if (auditIncomplete) {
+    overrides.push("Risk synthesis did not produce a usable verdict, so none is shown. Absence of a verdict is not approval.");
+  } else if (sig.disagreement) {
+    overrides.push("Voters disagreed on the tier — took the more conservative tier and flagged for human review.");
+  }
+  if (!auditIncomplete) {
+    // A high-stakes claim that voted GREEN but has no positively-verified citation. Two DISTINCT
+    // cases — do not conflate them (this was the aspirin over-flag):
+    //   • no citation was provided at all -> the claim is merely UNVERIFIED, not wrong. Fail-closed
+    //     forbids green, but the correct floor is MINOR ("unverified — no citation"), not significant.
+    //   • citations WERE provided but none verified (not_found / fabricated) -> a real risk driver
+    //     -> significant.
+    if (sig.hasHighStakes && sig.verifiedCount === 0 && tier === "no_issues_detected") {
+      if (sig.citationCount === 0) {
+        tier = "minor_concerns";
+        overrides.push("High-stakes claim provided without any citation — unverifiable, not a detected error.");
+      } else {
+        tier = "significant_concerns";
+        overrides.push("High-stakes claims with citations that could not be verified.");
+      }
+    }
+    // Evidence-relevance escalation: a contradicted citation is a critical signal.
+    if (sig.contradictedCount > 0 && tier !== "critical_issues") {
+      tier = "critical_issues";
+      overrides.push("A cited abstract contradicts the claim it was used to support.");
+    } else if (sig.unsupportedCount > 0 && (tier === "no_issues_detected" || tier === "minor_concerns")) {
+      tier = "significant_concerns";
+      overrides.push("A cited source does not actually support its claim.");
+    }
+    // Low ensemble agreement is a self-consistency red flag.
+    if (sig.agreementScore < 40 && tier === "no_issues_detected") {
+      tier = "minor_concerns";
+      overrides.push(sig.multiModel ? "The ensemble models disagreed substantially." : "The two self-consistency passes disagreed substantially.");
+    }
+  }
+  return { tier, overrides };
+}

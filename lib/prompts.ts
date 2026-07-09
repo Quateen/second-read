@@ -324,11 +324,20 @@ export const RISK_SYNTHESIS_PROMPT = (context: {
   specialty_match: { in_corpus: boolean; confidence_0_100: number };
 }): string => `Task: Synthesize all prior audit findings into a single tier with an explicit reasoning chain. Never approve. Highest allowed tier is "no_issues_detected".
 
+Definitions (use these precisely — they drive the tier):
+- RISK DRIVER = any one of: (a) a fabricated / non-existent citation; (b) a real citation that is mischaracterized or contradicts the claim it is cited for; (c) a claim contradicted by the cited or well-established evidence; (d) a "critical" missing-data item; (e) a drug-safety issue (wrong or dangerous dose, contraindication, interaction, unsafe monitoring); (f) a clinically dangerous, implausible, or genuinely contested assertion.
+- UNVERIFIED CLAIM = a clinical statement that lacks an inline citation but is otherwise clinically plausible and concordant with well-established practice or guidelines. "Unverified" means only "we could not machine-check it" — it does NOT mean "wrong" or "unsafe".
+
 Tier ladder (first match wins, top-down):
-1) critical_issues — fabricated citation tied to therapy/dose, OR contradicted high-stakes claim, OR a "critical" missing-data item, OR a drug-safety issue.
-2) significant_concerns — multiple unsupported or overconfident claims.
-3) minor_concerns — isolated unsupported/overconfident items with no safety impact.
-4) no_issues_detected — only when nothing above triggers.
+1) critical_issues — at least one HIGH-STAKES risk driver: a fabricated citation tied to a therapy/dose, a contradicted high-stakes claim, a "critical" missing-data item, or a drug-safety issue.
+2) significant_concerns — a lower-stakes risk driver (e.g. a mischaracterized citation, a non-critical contradicted claim), OR several compounding problems together (e.g. multiple claims that are BOTH uncited AND implausible/overconfident).
+3) minor_concerns — only UNVERIFIED CLAIMS and/or isolated overconfident phrasing, with NO risk driver present. This is the correct tier for a well-established, guideline-concordant statement that merely lacks an inline citation. Label such items "unverified — no citation provided", never "unsupported/dangerous".
+4) no_issues_detected — nothing above triggers AND every clinical claim was positively, deterministically corroborated. NEVER use this tier for a clinical claim that could not be verified.
+
+Calibration guardrails (read before choosing the tier):
+- Absence of a citation is NOT, by itself, a significant or critical problem. Do NOT escalate a plausible, established claim to significant/critical solely because it lacks a citation — that is minor_concerns ("unverified"). Example: "Aspirin 81 mg once daily is commonly used for secondary prevention after ischemic stroke" has no citation but is guideline-concordant and safe → minor_concerns, NOT significant.
+- Reserve significant_concerns and critical_issues for ACTUAL risk drivers as defined above. Reason about whether the claim is dangerous, contradicted, or contested — not merely whether a citation string is present.
+- Do NOT weaken detection of risk drivers: a fabricated citation, a contradicted claim, a critical missing-data item, or a drug-safety issue MUST still reach significant_concerns or critical_issues as specified above. Fail-closed stays intact — an unverifiable clinical claim floors at minor_concerns and can never be no_issues_detected.
 
 Hard rules:
 - specialty_match is INFORMATIONAL ONLY. Do NOT raise the tier, lower confidence, or trigger abstention merely because content is outside neurosurgery/spine. The verification methods work identically across all specialties. Judge the content purely on its citation, evidence, missing-data, and drug findings.

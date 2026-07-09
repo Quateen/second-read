@@ -13,7 +13,7 @@ import { extractCitations, extractDrugCandidates, ExtractedCitation } from "./ex
 import { verifyByPmid as pubmedByPmid, verifyByCitation as pubmedByCit, PubMedResult } from "./pubmed";
 import { verifyByDoi as crByDoi, verifyByQuery as crByQuery, CrossRefResult } from "./crossref";
 import { verifyDrugName, RxNormResult } from "./rxnorm";
-import { tierFromSynth, SynthTier } from "./tier";
+import { tierFromSynth, escalateTier, SynthTier } from "./tier";
 import { runQuorum, decideFinalTier, agreementMode, TierVote, AgreementMode } from "./ensemble";
 
 // High-stakes claim categories: acting on one without support/verification is a safety concern.
@@ -282,7 +282,9 @@ async function scoreEvidence(
   return settled.filter((x): x is EvidenceVerdict => x !== null);
 }
 
-export async function runAudit(input: string, opts: { specialty?: "neuro" | "other" } = {}): Promise<AuditEnvelope> {
+// `opts.specialty` is accepted for API back-compat but is INERT — it does not affect scoring,
+// confidence, or the tier. Verification is specialty-agnostic and specialty_match is informational.
+export async function runAudit(input: string, opts: { specialty?: string } = {}): Promise<AuditEnvelope> {
   const t0 = Date.now();
   let tokensIn = 0;
   let tokensOut = 0;
@@ -391,8 +393,10 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   // Evidence relevance: score verified abstracts against the highest-stakes claim.
   const evidence = await scoreEvidence(passA, allVerifs, accum);
 
-  // specialty_match is informational only and must not depress confidence, so the
-  // fallback confidence is neutral (75) regardless of in/out of corpus.
+  // specialty_match is informational only and must not depress confidence, so the fallback
+  // confidence is neutral (75) regardless of in/out of corpus. With the UI selector gone,
+  // opts.specialty is normally undefined -> in_corpus defaults to true (neutral); it never
+  // affects scoring or the tier.
   const specialtyMatch = claim.ok && (claim.data as any)?.specialty_match
     ? { ...(claim.data as any).specialty_match, confidence_0_100: 75 }
     : { in_corpus: opts.specialty !== "other", confidence_0_100: 75 };
@@ -448,13 +452,15 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   // Per-provider tier votes (normalized) + the truthful agreement mode + fail-closed decision.
   const tierVotes: TierVote[] = synthResults.map((r) => {
     const tier = r.ok ? tierFromSynth(r.data) : null;
-    // TEMP (remove once Claude's vote is confirmed on the preview): log the RAW vote shape so a
-    // null tier is diagnosable in Vercel logs rather than guessed at.
-    if (r.ok && !tier) console.log("[vote-raw]", r.provider, typeof r.data, JSON.stringify(r.data).slice(0, 400));
-    // Surface the reason in the event detail too, so it's visible in the theater without log access.
-    const detail = r.ok
-      ? (tier ? "" : "no tier — keys=[" + (isObj(r.data) ? Object.keys(r.data).slice(0, 12).join(",") : typeof r.data) + "]")
-      : (r.reason ?? "");
+    // TEMP (P1 — remove once a 5-run preview smoke test confirms Gemini stays in the 3-model vote):
+    // log Gemini's raw reason/shape so an intermittent "no vote" is diagnosable in Vercel logs
+    // (safety block, empty candidate, parse, timeout) rather than guessed at.
+    if (r.provider === "gemini" && (!r.ok || !tier)) {
+      console.log("[gemini-raw]", r.ok ? "ok:" + (tier ?? "no-tier") : "fail:" + (r.reason ?? "?"),
+        r.data != null ? JSON.stringify(r.data).slice(0, 400) : "");
+    }
+    // Honest fallback for a usable-response-but-no-tier case, surfaced in the theater without log access.
+    const detail = r.ok ? (tier ? "" : "no tier") : (r.reason ?? "");
     emit("voter", r.provider, r.ok ? (tier ? `vote:${tier}` : "flag") : "fail", tier ?? detail);
     return { provider: r.provider, ok: r.ok, tier };
   });
@@ -556,21 +562,13 @@ function compose(a: {
   events: AuditEvent[];
   durationMs: number; tokensIn: number; tokensOut: number;
 }): AuditEnvelope {
-  type Tier = "critical_issues" | "significant_concerns" | "minor_concerns" | "no_issues_detected" | "audit_incomplete";
-  const overrides: string[] = [];
   // A2/A3 (fail-closed ensemble): the tier is a CROSS-MODEL VOTE decided in runAudit — GREEN
   // requires unanimity + deterministic corroboration; any disagreement or a 2-of-3-only quorum
   // downgrades to the more conservative tier and flags for human review. A null vote means no model
   // produced a usable tier -> AUDIT_INCOMPLETE (never the greenest tier, never a tierMap miss;
-  // absence of a verdict is neither CRITICAL nor approval). Deterministic escalations below can only
-  // raise severity further.
+  // absence of a verdict is neither CRITICAL nor approval). Deterministic escalations only raise
+  // severity further — the whole arithmetic lives in escalateTier (pure + unit-tested).
   const auditIncomplete = a.votedTier === null;
-  let tier: Tier = a.votedTier !== null ? a.votedTier : "audit_incomplete";
-  if (auditIncomplete) {
-    overrides.push("Risk synthesis did not produce a usable verdict, so none is shown. Absence of a verdict is not approval.");
-  } else if (a.disagreement) {
-    overrides.push("Voters disagreed on the tier — took the more conservative tier and flagged for human review.");
-  }
   // Steps that invalidate trust in this run (for the confidence cap + drivers). When synthesis
   // produced no usable tier but did not hard-fail, its failure is not in coreStepFailures — add it.
   const failedSteps = [...a.coreStepFailures];
@@ -590,26 +588,18 @@ function compose(a: {
   const hasHighStakes = Array.isArray(a.claim?.claims) && a.claim.claims.some((c: any) => (HIGH_STAKES_CATEGORIES as readonly string[]).includes(c.category));
   const contradicted = a.evidence.filter((e) => e.verdict === "contradicted");
   const unsupported = a.evidence.filter((e) => e.verdict === "unsupported");
-  // Escalations only apply when a real verdict was produced. An incomplete audit
-  // stays incomplete — partial signals must not flip it to a colored tier.
-  if (!auditIncomplete) {
-    if (hasHighStakes && verified.length === 0 && tier === "no_issues_detected") {
-      tier = "significant_concerns"; overrides.push("High-stakes claims with zero verifiable citations.");
-    }
-    // Evidence-relevance escalation: a contradicted citation is a critical signal.
-    if (contradicted.length > 0 && tier !== "critical_issues") {
-      tier = "critical_issues";
-      overrides.push("A cited abstract contradicts the claim it was used to support.");
-    } else if (unsupported.length > 0 && (tier === "no_issues_detected" || tier === "minor_concerns")) {
-      tier = "significant_concerns";
-      overrides.push("A cited source does not actually support its claim.");
-    }
-    // Low ensemble agreement is a self-consistency red flag.
-    if (a.agreement.score < 40 && tier === "no_issues_detected") {
-      tier = "minor_concerns";
-      overrides.push(a.multiModel ? "The ensemble models disagreed substantially." : "The two self-consistency passes disagreed substantially.");
-    }
-  }
+  // Final tier = cross-model vote + deterministic escalations (pure, unit-tested in escalateTier).
+  const { tier, overrides } = escalateTier({
+    votedTier: a.votedTier,
+    disagreement: a.disagreement,
+    hasHighStakes,
+    verifiedCount: verified.length,
+    citationCount: a.citationVerifs.length,
+    contradictedCount: contradicted.length,
+    unsupportedCount: unsupported.length,
+    agreementScore: a.agreement.score,
+    multiModel: a.multiModel,
+  });
 
   const tierMap = {
     critical_issues: { v: "critical" as const, b: "CRITICAL ISSUES", t: "Critical issues" },
@@ -748,8 +738,8 @@ function compose(a: {
   ];
   // A3/A4: surface the fail-closed human-review flag and any voter disagreement prominently.
   if (a.humanReviewFlag) drivers.unshift("Human review recommended — voter disagreement or an incomplete (2-of-3) quorum.");
-  // Specialty is shown as a neutral context note, never as a confidence penalty.
-  if (!a.specialtyMatch.in_corpus) drivers.push("Specialty: outside neuro/spine corpus (informational; does not lower confidence).");
+  // P3: the "outside neuro/spine corpus" note is intentionally NOT surfaced — specialty is inert
+  // and showing it implied a scope the tool no longer scores by.
   if (contradicted.length) drivers.push(contradicted.length + " cited abstract(s) contradict their claim.");
   // If LLM-judgment calls failed, say so plainly in the drivers — this is why
   // factors read "n/a" and the rewrite/agreement are absent.

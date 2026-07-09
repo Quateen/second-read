@@ -53,6 +53,19 @@ const STEP_MS = [3500, 2500, 4000, 3500, 2500, 3500, 6000, 5000, 5000, 5000, 400
 // enforces the hard cap via MAX_AUDIT_INPUT_CHARS.
 const MAX_CHARS = 8000;
 
+// Per-audit feedback reason chips (mirrors FEEDBACK_REASONS in app/api/feedback/route.ts).
+const FB_REASONS = [
+  "Missed a real problem",
+  "False alarm — flagged something fine",
+  "Citation result wrong",
+  "Drug/medication result wrong",
+  "Verdict too harsh",
+  "Verdict too lenient",
+  "Confusing or unclear",
+  "Too slow",
+  "Other",
+];
+
 const PILL_CLS: Record<string, string> = {
   ok: "bg-info-soft text-info",
   warn: "bg-warn-soft text-warn",
@@ -71,12 +84,16 @@ const BADGE_CLS: Record<string, string> = {
 
 export default function AuditShell() {
   const [input, setInput] = useState("");
-  const [specialty, setSpecialty] = useState<"neuro" | "other">("neuro");
   const [loading, setLoading] = useState(false);
   const [stepIdx, setStepIdx] = useState(0);
   const [audit, setAudit] = useState<Audit | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [openDomain, setOpenDomain] = useState<Domain | null>(null);
+  // Per-audit feedback (thumbs + optional reasons). Reset whenever a new audit lands.
+  const [fbChoice, setFbChoice] = useState<null | "up" | "down">(null);
+  const [fbReasons, setFbReasons] = useState<string[]>([]);
+  const [fbComment, setFbComment] = useState("");
+  const [fbStatus, setFbStatus] = useState<"idle" | "sending" | "done" | "error">("idle");
   const cycleRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
@@ -98,7 +115,38 @@ export default function AuditShell() {
 
   useEffect(() => {
     if (audit && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    // A new audit -> fresh feedback state.
+    setFbChoice(null);
+    setFbReasons([]);
+    setFbComment("");
+    setFbStatus("idle");
   }, [audit]);
+
+  function toggleReason(r: string) {
+    setFbReasons((prev) => (prev.includes(r) ? prev.filter((x) => x !== r) : [...prev, r]));
+  }
+
+  async function submitFeedback(rating: "up" | "down") {
+    if (!audit) return;
+    // A thumbs-down needs at least one reason chip or a comment.
+    if (rating === "down" && fbReasons.length === 0 && fbComment.trim().length === 0) return;
+    setFbStatus("sending");
+    try {
+      const res = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          audit_id: audit.shareId ?? null,
+          rating,
+          reasons: rating === "down" ? fbReasons : [],
+          comment: rating === "down" ? fbComment.trim() || undefined : undefined,
+        }),
+      });
+      setFbStatus(res.ok ? "done" : "error");
+    } catch {
+      setFbStatus("error");
+    }
+  }
 
   async function runAudit() {
     setErr(null);
@@ -109,7 +157,7 @@ export default function AuditShell() {
       const res = await fetch("/api/audit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ input, specialty }),
+        body: JSON.stringify({ input }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -164,16 +212,9 @@ export default function AuditShell() {
           That&apos;s longer than ~{MAX_CHARS.toLocaleString()} characters. Paste the key claims or conclusions you want audited, not the whole document.
         </p>
       )}
-      <div className="flex justify-between items-center mt-3.5 gap-2.5 flex-wrap">
-        <div>
-          <span className="text-[13px] text-muted mr-2">Specialty:</span>
-          <select value={specialty} onChange={(e) => setSpecialty(e.target.value as any)} className="text-[13px] px-2 py-1 border border-line bg-white rounded">
-            <option value="neuro">Neurosurgery / spine</option>
-            <option value="other">Other specialty</option>
-          </select>
-        </div>
+      <div className="flex justify-end items-center mt-3.5 gap-2.5 flex-wrap">
         <div className="flex gap-2.5 flex-wrap">
-          <button onClick={() => { setInput(SAMPLE); setSpecialty("neuro"); }} className="px-5 py-3 text-[15px] font-medium bg-transparent text-ink border border-ink rounded-[2px]">Load sample content</button>
+          <button onClick={() => setInput(SAMPLE)} className="px-5 py-3 text-[15px] font-medium bg-transparent text-ink border border-ink rounded-[2px]">Load sample content</button>
           <button onClick={runAudit} disabled={loading} className="px-5 py-3 text-[15px] font-medium bg-ink text-white border border-ink rounded-[2px] disabled:opacity-50">
             {loading ? "Running..." : "Run audit"}
           </button>
@@ -287,6 +328,82 @@ export default function AuditShell() {
                 </button>
               )}
             </div>
+          </div>
+
+          <div className="mt-5 border-t border-line pt-4 no-print">
+            {fbStatus === "done" ? (
+              <div className="flex items-center gap-3 text-[13.5px] text-muted flex-wrap">
+                <span>Thanks \u2014 your feedback was recorded.</span>
+                <button
+                  onClick={() => { setFbStatus("idle"); setFbChoice(null); setFbReasons([]); setFbComment(""); }}
+                  className="text-info underline underline-offset-2"
+                >Change</button>
+              </div>
+            ) : (
+              <div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-[13.5px] text-ink-soft">Was this audit helpful?</span>
+                  <div className="flex gap-2">
+                    <button
+                      aria-label="Yes, this audit was helpful"
+                      aria-pressed={fbChoice === "up"}
+                      onClick={() => { setFbChoice("up"); submitFeedback("up"); }}
+                      disabled={fbStatus === "sending"}
+                      className={"px-3 py-1.5 border rounded-[2px] text-[13px] disabled:opacity-50 " + (fbChoice === "up" ? "border-info text-info bg-info-soft" : "border-line text-ink hover:border-ink")}
+                    ><span aria-hidden="true">{"\ud83d\udc4d"}</span> Yes</button>
+                    <button
+                      aria-label="No, this audit had a problem"
+                      aria-pressed={fbChoice === "down"}
+                      onClick={() => setFbChoice("down")}
+                      disabled={fbStatus === "sending"}
+                      className={"px-3 py-1.5 border rounded-[2px] text-[13px] disabled:opacity-50 " + (fbChoice === "down" ? "border-warn text-warn bg-warn-soft" : "border-line text-ink hover:border-ink")}
+                    ><span aria-hidden="true">{"\ud83d\udc4e"}</span> No</button>
+                  </div>
+                </div>
+
+                {fbChoice === "up" && fbStatus === "error" && (
+                  <p className="text-[12.5px] text-crit mt-2">Couldn&apos;t send \u2014 <button onClick={() => submitFeedback("up")} className="underline">retry</button>.</p>
+                )}
+
+                {fbChoice === "down" && (
+                  <div className="mt-3">
+                    <p className="text-[12.5px] text-muted mb-2">What went wrong? Pick at least one, or add a note.</p>
+                    <div className="flex flex-wrap gap-2">
+                      {FB_REASONS.map((r) => {
+                        const on = fbReasons.includes(r);
+                        return (
+                          <button
+                            key={r}
+                            type="button"
+                            aria-pressed={on}
+                            onClick={() => toggleReason(r)}
+                            className={"px-2.5 py-1 rounded-full border text-[12.5px] " + (on ? "border-ink bg-ink text-white" : "border-line text-ink-soft hover:border-ink")}
+                          >{r}</button>
+                        );
+                      })}
+                    </div>
+                    <label htmlFor="fb-comment" className="sr-only">Optional feedback detail</label>
+                    <textarea
+                      id="fb-comment"
+                      value={fbComment}
+                      onChange={(e) => setFbComment(e.target.value)}
+                      placeholder="Optional detail \u2014 do not include patient-identifying information."
+                      maxLength={1000}
+                      className="w-full mt-3 min-h-[64px] text-[13px] p-2.5 border border-line rounded bg-[#fdfdfb] text-ink resize-y focus:outline-none focus:border-ink"
+                    />
+                    <p className="text-[12px] text-muted mt-1">Don&apos;t include patient-identifying information.</p>
+                    <div className="mt-2 flex items-center gap-3 flex-wrap">
+                      <button
+                        onClick={() => submitFeedback("down")}
+                        disabled={fbStatus === "sending" || (fbReasons.length === 0 && fbComment.trim().length === 0)}
+                        className="px-4 py-2 text-[13px] font-medium bg-ink text-white border border-ink rounded-[2px] disabled:opacity-50"
+                      >{fbStatus === "sending" ? "Sending\u2026" : "Submit feedback"}</button>
+                      {fbStatus === "error" && <span className="text-[12.5px] text-crit">Couldn&apos;t send \u2014 try again.</span>}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
