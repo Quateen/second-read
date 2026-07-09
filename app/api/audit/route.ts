@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { runAudit } from "@/lib/audit-pipeline";
-import { consume } from "@/lib/rate-limit";
+import { consume, isEvalBypass } from "@/lib/rate-limit";
 import { saveAudit } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -33,7 +33,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Validation failed", issues: parsed.error.flatten() }, { status: 400 });
   }
   const ip = getIp(req);
-  const rl = await consume(ip);
+  // Evaluation bypass: the golden-set harness sends x-eval-token to skip the daily cap so all 50
+  // cases can run. Only active when EVAL_BYPASS_TOKEN is set and the header matches exactly.
+  const bypass = isEvalBypass(req.headers.get("x-eval-token"), process.env.EVAL_BYPASS_TOKEN);
+  const rl = bypass
+    ? { ok: true, remaining: 9999, resetAt: Date.now() + 86_400_000, limit: 9999, durable: false }
+    : await consume(ip);
   if (!rl.ok) {
     return NextResponse.json({ error: "rate_limited", message: "Daily free tier limit reached. Resets at " + new Date(rl.resetAt).toISOString() }, { status: 429 });
   }

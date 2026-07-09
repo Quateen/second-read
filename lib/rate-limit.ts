@@ -7,7 +7,7 @@
 // Fallback mode: if KV is not configured, it degrades to an in-memory Map
 // (best-effort, per-instance) so the app still runs with zero setup.
 
-const LIMIT = Number(process.env.DAILY_AUDIT_LIMIT_PER_IP || 5);
+const LIMIT = Number(process.env.RATE_LIMIT_PER_DAY || process.env.DAILY_AUDIT_LIMIT_PER_IP || 5);
 const DAY_SECONDS = 24 * 60 * 60;
 
 const KV_URL = process.env.KV_REST_API_URL;
@@ -15,6 +15,13 @@ const KV_TOKEN = process.env.KV_REST_API_TOKEN;
 export const isDurable = !!(KV_URL && KV_TOKEN);
 
 export type RateResult = { ok: boolean; remaining: number; resetAt: number; limit: number; durable: boolean };
+
+// Evaluation bypass: the golden-set harness sends an x-eval-token header to skip the daily cap so
+// all 50 cases can run. Only active when EVAL_BYPASS_TOKEN is set AND the header matches exactly —
+// an empty/unset env token can never be bypassed (normal users are never affected).
+export function isEvalBypass(headerToken: string | null | undefined, envToken: string | undefined): boolean {
+  return !!envToken && headerToken === envToken;
+}
 
 // --- In-memory fallback ----------------------------------------------------
 const buckets = new Map<string, { count: number; resetAt: number }>();
