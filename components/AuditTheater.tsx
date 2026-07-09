@@ -47,8 +47,9 @@ function style(css: string): CSSProperties {
   return o;
 }
 
-export default function AuditTheater({ events, tierVotes, agreementMode, humanReviewFlag }: {
+export default function AuditTheater({ events, tierVotes, agreementMode, humanReviewFlag, durationMs, tokensTotal, costUsd }: {
   events: TheaterEvent[]; tierVotes: TheaterVote[]; agreementMode: string; humanReviewFlag: boolean;
+  durationMs?: number; tokensTotal?: number; costUsd?: number;
 }) {
   const reduced = usePrefersReducedMotion();
   const [n, setN] = useState(events.length);
@@ -99,6 +100,20 @@ export default function AuditTheater({ events, tierVotes, agreementMode, humanRe
 
   const pct = events.length ? Math.round((n / events.length) * 100) : 100;
 
+  // Live readouts (B5): phase label + elapsed / tokens / cost, counting up over the replay.
+  const lastEv = shown[shown.length - 1];
+  const phase = !shown.length ? "starting"
+    : done ? "done"
+    : lastEv?.kind === "verdict" ? "verdict"
+    : lastEv?.kind === "voter" ? "voting"
+    : lastEv?.kind === "verifier" ? "verifying"
+    : lastEv?.kind === "finding" ? "checking"
+    : "extracting";
+  const progress = events.length ? n / events.length : 1;
+  const elapsedS = done && durationMs != null ? (durationMs / 1000) : (lastEv ? lastEv.ts / 1000 : 0);
+  const tokensShown = tokensTotal != null ? Math.round(tokensTotal * (done ? 1 : progress)) : null;
+  const costShown = costUsd != null ? costUsd * (done ? 1 : progress) : null;
+
   return (
     <div className="border border-line rounded bg-white p-4 mt-4" aria-label="Audit orchestration">
       {/* Orchestrator bar */}
@@ -107,12 +122,22 @@ export default function AuditTheater({ events, tierVotes, agreementMode, humanRe
           <span className={"inline-block w-2.5 h-2.5 rounded-full " + (done ? "bg-info" : "bg-info " + (reduced ? "" : "animate-pulse"))} aria-hidden />
           <span className="text-[13px] font-semibold text-ink uppercase tracking-[.06em]">Orchestrator</span>
           <span className="text-[12px] text-muted">· {modeLabel}</span>
+          {!done && <span className="text-[11px] text-info font-medium uppercase tracking-[.05em]">· {phase}…</span>}
         </div>
-        {humanReviewFlag && (
-          <span className="text-[11px] font-semibold px-2 py-0.5 rounded-[2px] uppercase tracking-[.05em]" style={style(FIND_STYLE.noted.css)}>Human review recommended</span>
-        )}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="mono text-[12px] text-muted">
+            {elapsedS.toFixed(1)}s
+            {tokensShown != null ? " · " + tokensShown.toLocaleString() + " tok" : ""}
+            {costShown != null ? " · $" + costShown.toFixed(4) : ""}
+          </span>
+          {humanReviewFlag && (
+            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-[2px] uppercase tracking-[.05em]" style={style(FIND_STYLE.noted.css)}>Human review recommended</span>
+          )}
+        </div>
       </div>
-      <div className="h-[4px] bg-[#e0ddd4] overflow-hidden rounded mb-4"><div className="h-full bg-ink transition-all duration-300" style={{ width: pct + "%" }} /></div>
+      <div className="h-[4px] bg-[#e0ddd4] overflow-hidden rounded mb-4">
+        <div className={"h-full bg-ink transition-all duration-300 " + (!done && !reduced ? "animate-pulse" : "")} style={{ width: pct + "%" }} />
+      </div>
 
       {/* Voter + verifier lanes */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">

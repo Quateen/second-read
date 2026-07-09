@@ -49,6 +49,9 @@ const STEPS = [
 // with a typical 30-55s audit. The bar advances on this schedule while the
 // request is in flight, then snaps to complete when the response returns.
 const STEP_MS = [3500, 2500, 4000, 3500, 2500, 3500, 6000, 5000, 5000, 5000, 4000];
+// Soft display limit shown to users (the audit focuses on AI output, not full papers). The server
+// enforces the hard cap via MAX_AUDIT_INPUT_CHARS.
+const MAX_CHARS = 8000;
 
 const PILL_CLS: Record<string, string> = {
   ok: "bg-info-soft text-info",
@@ -137,16 +140,30 @@ export default function AuditShell() {
 
   return (
     <div className="bg-white border border-line rounded p-6 mt-6">
-      <label htmlFor="input" className="block text-[13px] text-muted uppercase tracking-[.06em] mb-2">
+      <label htmlFor="input" className="block text-[13px] text-muted uppercase tracking-[.06em] mb-1">
         Paste AI-generated clinical content
       </label>
+      <p className="text-[12.5px] text-muted mb-2">
+        Paste the AI-generated content you want checked — a recommendation, answer, summary, or its
+        conclusions. Not a whole article or PDF (max ~{MAX_CHARS.toLocaleString()} characters).
+      </p>
       <textarea
         id="input"
         value={input}
         onChange={(e) => setInput(e.target.value)}
-        placeholder="Paste output from ChatGPT, Claude, Perplexity, Gemini, or any other AI tool."
+        placeholder="e.g. a ChatGPT / Claude / Gemini answer with a treatment recommendation and its citations — paste the claims or conclusions you want audited."
         className="w-full min-h-[180px] mono text-[13.5px] leading-[1.55] p-3.5 border border-line rounded bg-[#fdfdfb] text-ink resize-y focus:outline-none focus:border-ink"
       />
+      <div className="flex justify-end mt-1">
+        <span className={"text-[12px] mono " + (input.length > MAX_CHARS ? "text-crit font-medium" : "text-muted")}>
+          {input.length.toLocaleString()} / {MAX_CHARS.toLocaleString()}
+        </span>
+      </div>
+      {input.length > MAX_CHARS && (
+        <p className="text-[12.5px] text-crit mt-1">
+          That&apos;s longer than ~{MAX_CHARS.toLocaleString()} characters. Paste the key claims or conclusions you want audited, not the whole document.
+        </p>
+      )}
       <div className="flex justify-between items-center mt-3.5 gap-2.5 flex-wrap">
         <div>
           <span className="text-[13px] text-muted mr-2">Specialty:</span>
@@ -238,6 +255,9 @@ export default function AuditShell() {
               tierVotes={audit.tierVotes ?? []}
               agreementMode={audit.agreementMode ?? "self_consistency:claude"}
               humanReviewFlag={!!audit.humanReviewFlag}
+              durationMs={audit.diagnostics?.durationMs}
+              tokensTotal={audit.diagnostics ? audit.diagnostics.tokensIn + audit.diagnostics.tokensOut : undefined}
+              costUsd={audit.diagnostics?.costEstimateUsd}
             />
           )}
 
