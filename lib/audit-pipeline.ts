@@ -415,7 +415,9 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   const [synthQuorum, rewrite, conf] = await Promise.all([
     runQuorum<any>(providers, (p) => {
       emit("voter", p, "start", "risk_synthesis");
-      return callLLMJSON<any>(p, synthPrompt, { temperature: 0.2, maxTokens: 2200 });
+      // Headroom: Claude has no strict JSON mode and can be verbose, so 2200 could truncate its
+      // synth object into a fragment with no top-level tier (-> a null vote). 3500 avoids that.
+      return callLLMJSON<any>(p, synthPrompt, { temperature: 0.2, maxTokens: 3500 });
     }, { perCallTimeoutMs: 20000, quorumTimeoutMs: 14000 }),
     callClaudeJSON<any>(SAFE_REWRITE_PROMPT({
       input: safeShort,
@@ -446,7 +448,14 @@ export async function runAudit(input: string, opts: { specialty?: "neuro" | "oth
   // Per-provider tier votes (normalized) + the truthful agreement mode + fail-closed decision.
   const tierVotes: TierVote[] = synthResults.map((r) => {
     const tier = r.ok ? tierFromSynth(r.data) : null;
-    emit("voter", r.provider, r.ok ? (tier ? `vote:${tier}` : "flag") : "fail", tier ?? r.reason ?? "");
+    // TEMP (remove once Claude's vote is confirmed on the preview): log the RAW vote shape so a
+    // null tier is diagnosable in Vercel logs rather than guessed at.
+    if (r.ok && !tier) console.log("[vote-raw]", r.provider, typeof r.data, JSON.stringify(r.data).slice(0, 400));
+    // Surface the reason in the event detail too, so it's visible in the theater without log access.
+    const detail = r.ok
+      ? (tier ? "" : "no tier — keys=[" + (isObj(r.data) ? Object.keys(r.data).slice(0, 12).join(",") : typeof r.data) + "]")
+      : (r.reason ?? "");
+    emit("voter", r.provider, r.ok ? (tier ? `vote:${tier}` : "flag") : "fail", tier ?? detail);
     return { provider: r.provider, ok: r.ok, tier };
   });
   const synthOkCount = synthResults.filter((r) => r.ok).length;

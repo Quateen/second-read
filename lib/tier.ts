@@ -36,16 +36,35 @@ export function normalizeSynthTier(raw: unknown): SynthTier | null {
 // Pull the tier out of whatever shape a model used: a direct field, an alternate name, or a
 // string/object nested under verdict/risk/etc. Returns the RAW value (string or undefined) for
 // normalizeSynthTier to map. Shared by the risk-synthesis composer and the ensemble tier vote.
+const TIER_KEY = /(tier|verdict|risk_?level|classification|rating|overall_?risk)/i;
+
 export function pickTierRaw(d: any): unknown {
   if (!d || typeof d !== "object") return undefined;
   const direct = d.tier ?? d.risk_tier ?? d.risk_level ?? d.overall_tier ?? d.verdict_tier;
   if (typeof direct === "string") return direct;
-  for (const k of ["verdict", "risk", "risk_synthesis", "synthesis", "assessment", "summary"]) {
+  for (const k of ["verdict", "risk", "risk_synthesis", "synthesis", "assessment", "summary", "result", "output"]) {
     const v = d[k];
     if (typeof v === "string") return v;
-    if (v && typeof v === "object") {
-      const nested = v.tier ?? v.risk_tier ?? v.level ?? v.rating;
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const nested = v.tier ?? v.risk_tier ?? v.level ?? v.rating ?? v.verdict;
       if (typeof nested === "string") return nested;
+    }
+  }
+  // Fallback: any TIER-LIKE key (top level, or one object-nest deep) whose string value maps to a
+  // known tier — robust to a model naming the field differently. Deliberately does NOT scan array
+  // items (a single finding's `severity` is not the overall verdict tier).
+  const scan = (obj: any): string | undefined => {
+    for (const [k, val] of Object.entries(obj)) {
+      if (typeof val === "string" && TIER_KEY.test(k) && normalizeSynthTier(val)) return val;
+    }
+    return undefined;
+  };
+  const top = scan(d);
+  if (top) return top;
+  for (const val of Object.values(d)) {
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      const nested = scan(val);
+      if (nested) return nested;
     }
   }
   return direct;
