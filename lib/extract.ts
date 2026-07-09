@@ -6,12 +6,25 @@ export type ExtractedCitation = {
   year?: number;
   journal?: string;
   title?: string;
+  volume?: string;
+  firstPage?: string;
 };
 
 const DOI_RE = /\b10\.\d{4,9}\/[\w.\-;()/:]+/gi;
 const DOI_TRIM = /[.,;)\]]+$/;
 const PMID_RE = /\bPMID:?\s*(\d{4,9})\b/gi;
 const PARENS_RE = /\(([A-Z][a-zA-Z'-]+(?:\s+(?:et al\.?|and\s+[A-Z][a-zA-Z'-]+))?)[,;]?\s*([^,)]+?)?[,;]?\s*(19|20)(\d{2})\)/g;
+// Vancouver-style bibliographic form: "Surname AB, Surname CD. Journal Name. YEAR;vol:pages".
+// PARENS_RE only fires when the year sits immediately before ')', so it misses this
+// extremely common citation shape (e.g. the FAB-01 test case). Catch it deterministically
+// so PubMed/CrossRef verification runs on it even when the LLM extractor returns nothing.
+// The first author's initials are REQUIRED (real Vancouver refs always have them) — this
+// rejects ordinary "Capword. Capword. YEAR;n" prose. The author-list repeat is bounded to
+// keep matching linear regardless of the (operator-configurable) input length.
+// Captures author(1), journal(2), year(3), volume(4), and first page(5, optional) — the
+// volume+page pair is the most reliable deterministic disambiguator when there is no title.
+const VANCOUVER_RE =
+  /\b([A-Z][A-Za-z'’-]+)\s+[A-Z]{1,3}\.?(?:\s*,\s*[A-Z][A-Za-z'’-]+(?:\s+[A-Z]{1,3}\.?)?|\s*,?\s*et al\.?){0,20}\.\s+([A-Z][A-Za-z0-9 .,&:'’/()-]{3,90}?)\.\s+((?:19|20)\d{2})\s*;\s*(\d+)(?:\s*\(\d+\))?(?:\s*:\s*([A-Za-z]?\d+))?/g;
 
 export function extractCitations(text: string): ExtractedCitation[] {
   const out: ExtractedCitation[] = [];
@@ -42,6 +55,19 @@ export function extractCitations(text: string): ExtractedCitation[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ raw: m[0], author, year, journal });
+  }
+  VANCOUVER_RE.lastIndex = 0;
+  while ((m = VANCOUVER_RE.exec(text)) !== null) {
+    const author = m[1].trim();
+    const journal = m[2].trim();
+    const year = Number(m[3]);
+    const volume = m[4] || undefined;
+    const firstPage = m[5] || undefined;
+    // Share the parenthetical namespace so the same citation isn't double-counted.
+    const key = "parens:" + author.toLowerCase() + "|" + year + "|" + journal.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ raw: m[0].trim(), author, year, journal, volume, firstPage });
   }
   return out.slice(0, 30);
 }

@@ -1,16 +1,22 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import AuditTheater, { TheaterEvent, TheaterVote } from "./AuditTheater";
 
 type Finding = { lbl: string; title: string; src: string; sev: "critical" | "important" | "contextual" };
 type Domain = { id: string; label: string; pill: "ok" | "warn" | "crit" | "neut"; pillText: string; summary: string; findings: Finding[] };
 export type Audit = {
-  verdictTier: "no-issues" | "minor" | "significant" | "critical";
+  verdictTier: "no-issues" | "minor" | "significant" | "critical" | "incomplete";
   verdictTitle: string;
   verdictBadge: string;
   reason: string;
   metaConfidence: number;
   metaLabel: "Low" | "Moderate" | "High";
   metaDrivers: string[];
+  agreementMode?: string;
+  disagreement?: boolean;
+  humanReviewFlag?: boolean;
+  tierVotes?: TheaterVote[];
+  events?: TheaterEvent[];
   domains: Domain[];
   rewrite: string;
   diagnostics?: { durationMs: number; tokensIn: number; tokensOut: number; costEstimateUsd: number; citationsChecked: number; citationsVerified: number; citationsNotFound: number; drugsChecked: number; drugsVerified: number; llmFailures?: string[] };
@@ -52,6 +58,9 @@ const PILL_CLS: Record<string, string> = {
 };
 const BADGE_CLS: Record<string, string> = {
   "no-issues": "bg-info-soft text-info",
+  // AUDIT_INCOMPLETE: same neutral style as "no-issues" — never green, never red.
+  // The top clinical-alarm tier must never mean "the audit failed".
+  incomplete: "bg-info-soft text-info",
   minor: "bg-[#f3f0e6] text-[#5a4a00]",
   significant: "bg-warn-soft text-warn",
   critical: "bg-crit-soft text-crit",
@@ -222,6 +231,15 @@ export default function AuditShell() {
               </ul>
             </div>
           </div>
+
+          {audit.events && audit.events.length > 0 && (
+            <AuditTheater
+              events={audit.events}
+              tierVotes={audit.tierVotes ?? []}
+              agreementMode={audit.agreementMode ?? "self_consistency:claude"}
+              humanReviewFlag={!!audit.humanReviewFlag}
+            />
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 mt-4">
             {audit.domains.map((d) => (

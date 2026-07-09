@@ -8,6 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { SYSTEM_PROMPT } from "./prompts";
+import { extractJSON } from "./json";
 
 export type Provider = "claude" | "gpt" | "gemini";
 
@@ -15,16 +16,21 @@ export type LLMJsonResult<T> =
   | { ok: true; provider: Provider; data: T; usage: { input_tokens: number; output_tokens: number } }
   | { ok: false; provider: Provider; reason: "parse" | "api" | "empty" | "no_key"; detail?: string };
 
+// Gemini's key is read from GOOGLE_API_KEY (the name set in Vercel) with GEMINI_API_KEY as a
+// backward-compatible fallback — otherwise the provider stays dormant and the ensemble silently
+// runs at 2 models instead of 3.
+const GOOGLE_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+
 const MODELS: Record<Provider, string> = {
   claude: process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001",
   gpt: process.env.OPENAI_MODEL || "gpt-4o-mini",
-  gemini: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+  gemini: process.env.GEMINI_MODEL || process.env.GOOGLE_MODEL || "gemini-1.5-flash",
 };
 
 export function isProviderAvailable(p: Provider): boolean {
   if (p === "claude") return !!process.env.ANTHROPIC_API_KEY;
   if (p === "gpt") return !!process.env.OPENAI_API_KEY;
-  if (p === "gemini") return !!process.env.GEMINI_API_KEY;
+  if (p === "gemini") return !!GOOGLE_KEY;
   return false;
 }
 
@@ -47,7 +53,7 @@ function openai(): OpenAI {
   return _openai;
 }
 function gemini(): GoogleGenerativeAI {
-  if (!_gemini) _gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+  if (!_gemini) _gemini = new GoogleGenerativeAI(GOOGLE_KEY!);
   return _gemini;
 }
 
@@ -140,24 +146,6 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-export function extractJSON(text: string): string {
-  const trimmed = text.trim();
-  try { JSON.parse(trimmed); return trimmed; } catch {}
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) {
-    try { JSON.parse(fence[1].trim()); return fence[1].trim(); } catch {}
-  }
-  const start = text.indexOf("{");
-  if (start < 0) return trimmed;
-  let depth = 0, inStr = false, escape = false;
-  for (let i = start; i < text.length; i++) {
-    const c = text[i];
-    if (escape) { escape = false; continue; }
-    if (c === "\\") { escape = true; continue; }
-    if (c === '"') { inStr = !inStr; continue; }
-    if (inStr) continue;
-    if (c === "{") depth++;
-    else if (c === "}") { depth--; if (depth === 0) return text.slice(start, i + 1); }
-  }
-  return trimmed;
-}
+// Re-exported from ./json (single source of truth) so existing importers of
+// `extractJSON` from this module keep working.
+export { extractJSON };

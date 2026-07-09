@@ -1,4 +1,5 @@
 // lib/pubmed.ts — deterministic PubMed E-utilities verification
+import { isStrongCitationMatch } from "./citation-match";
 const UA = "SecondRead/1.0 (https://secondread.health; mailto:ahmed@nucleusdigitalis.com)";
 const BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils";
 const API_KEY = process.env.NCBI_API_KEY;
@@ -13,6 +14,8 @@ export type PubMedResult =
       year?: number;
       abstract?: string;
       doi?: string;
+      volume?: string;
+      firstPage?: string;
       mismatchFields?: string[];
     }
   | { status: "not_found" }
@@ -99,19 +102,28 @@ export async function verifyByPmid(pmid: string): Promise<PubMedResult> {
     year,
     abstract: extra.abstract,
     doi: extra.doi || rec.elocationid?.replace(/^doi:\s*/i, ""),
+    volume: rec.volume ? String(rec.volume) : undefined,
+    firstPage: rec.pages ? String(rec.pages).split(/[-–]/)[0].trim() : undefined,
   };
 }
 
-/** Find a PubMed record by citation fields (author + year fuzzy match). */
+/** Find a PubMed record by citation fields, then confirm it actually matches the citation. */
 export async function verifyByCitation(c: {
   author: string;
   year: number;
   title?: string;
   journal?: string;
+  volume?: string;
+  firstPage?: string;
 }): Promise<PubMedResult> {
+  // Anchor on volume + first page when available — they pin the exact paper regardless of how
+  // the journal name is written. A hard "Full Journal Name"[Journal] filter returns 0 for names
+  // PubMed indexes by NLM abbreviation (e.g. "New England Journal of Medicine"), so do NOT use it;
+  // journal concordance is validated post-hoc by isStrongCitationMatch instead.
   const parts = [`${c.author}[Author]`, `${c.year}[PDAT]`];
-  if (c.title) parts.push(`${c.title.split(/\s+/).slice(0, 6).join(" ")}[Title]`);
-  if (c.journal) parts.push(`"${c.journal}"[Journal]`);
+  if (c.volume) parts.push(`${c.volume}[Volume]`);
+  if (c.firstPage) parts.push(`${c.firstPage.replace(/^0+/, "")}[Page]`);
+  if (!c.volume && c.title) parts.push(`${c.title.split(/\s+/).slice(0, 6).join(" ")}[Title]`);
   const term = parts.join(" AND ");
   const r = await eutilsFetch("esearch.fcgi", { db: "pubmed", term, retmode: "json", retmax: "5", sort: "relevance" });
   if ("error" in r) return r.error;
@@ -123,27 +135,19 @@ export async function verifyByCitation(c: {
   }
   const ids: string[] = json?.esearchresult?.idlist ?? [];
   if (!ids.length) return { status: "not_found" };
-  const top = await verifyByPmid(ids[0]);
-  if (top.status !== "found") return top;
-  const mismatch: string[] = [];
-  if (top.year && top.year !== c.year) mismatch.push("year");
-  if (
-    c.author &&
-    top.authors &&
-    !top.authors.some((a) => a.toLowerCase().includes(c.author.toLowerCase().split(/[\s,]/)[0]))
-  )
-    mismatch.push("author");
-  if (
-    c.journal &&
-    top.journal &&
-    !top.journal.toLowerCase().includes(c.journal.toLowerCase().split(/\s+/)[0])
-  )
-    mismatch.push("journal");
-  if (
-    c.title &&
-    top.title &&
-    !top.title.toLowerCase().includes(c.title.toLowerCase().split(/\s+/).slice(0, 3).join(" "))
-  )
-    mismatch.push("title");
-  return { ...top, mismatchFields: mismatch.length ? mismatch : undefined };
+  // Validate the top candidates; accept the first that actually concords with the citation.
+  for (const id of ids.slice(0, 3)) {
+    const top = await verifyByPmid(id);
+    if (top.status === "error") return top;
+    if (top.status !== "found") continue;
+    if (!isStrongCitationMatch(
+      { author: c.author, year: c.year, journal: c.journal, title: c.title, volume: c.volume, firstPage: c.firstPage },
+      { authors: top.authors, year: top.year, journal: top.journal, title: top.title, volume: top.volume, firstPage: top.firstPage }
+    )) continue;
+    const mismatch: string[] = [];
+    if (top.year && Math.abs(top.year - c.year) > 1) mismatch.push("year");
+    if (c.journal && top.journal && !top.journal.toLowerCase().includes(c.journal.toLowerCase().split(/\s+/)[0])) mismatch.push("journal");
+    return { ...top, mismatchFields: mismatch.length ? mismatch : undefined };
+  }
+  return { status: "not_found" };
 }

@@ -6,6 +6,8 @@ export const dynamic = "force-dynamic";
 
 const BADGE: Record<string, string> = {
   "no-issues": "background:#e6f0ef;color:#0b6e63",
+  // AUDIT INCOMPLETE renders neutral (never green, never red) — matches the main app.
+  incomplete: "background:#eaf1f8;color:#0284c7",
   minor: "background:#f3f0e6;color:#5a4a00",
   significant: "background:#fbeede;color:#9a5b00",
   critical: "background:#fbe6e6;color:#b3261e",
