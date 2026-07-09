@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { SYSTEM_PROMPT } from "./prompts";
-import { extractJSON } from "./json";
+import { extractJSON, parseJSONLoose } from "./json";
 
 const MODEL = process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001";
 
@@ -45,7 +45,7 @@ export async function callClaudeJSON<T = unknown>(
       try {
         return {
           ok: true,
-          data: JSON.parse(jsonStr) as T,
+          data: parseJSONLoose(jsonStr) as T,
           usage: { input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens },
         };
       } catch (e: any) {

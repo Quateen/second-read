@@ -8,7 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { SYSTEM_PROMPT } from "./prompts";
-import { extractJSON } from "./json";
+import { extractJSON, parseJSONLoose } from "./json";
 
 export type Provider = "claude" | "gpt" | "gemini";
 
@@ -125,7 +125,7 @@ export async function callLLMJSON<T = unknown>(
       if (!text.trim()) return { ok: false, provider, reason: "empty" };
       const jsonStr = extractJSON(text);
       try {
-        return { ok: true, provider, data: JSON.parse(jsonStr) as T, usage };
+        return { ok: true, provider, data: parseJSONLoose(jsonStr) as T, usage };
       } catch (e: any) {
         return { ok: false, provider, reason: "parse", detail: String(e?.message ?? e) };
       }

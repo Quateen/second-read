@@ -69,3 +69,13 @@ export function extractJSON(text: string): string {
   // the caller's one-retry nudge still fires.
   return firstArray ?? firstBlock ?? t;
 }
+
+// Parse LLM-produced JSON, repairing the most common models' errors on a strict-parse failure.
+// (Gemini in particular occasionally emits a trailing comma before } or ] -> "Expected
+// double-quoted property name".) Only kicks in when strict JSON.parse fails; throws if still
+// invalid so the caller's parse/retry path is preserved.
+export function parseJSONLoose(s: string): any {
+  try { return JSON.parse(s); } catch {}
+  const repaired = s.replace(/,(\s*[}\]])/g, "$1"); // trailing comma before a closing brace/bracket
+  return JSON.parse(repaired);
+}
