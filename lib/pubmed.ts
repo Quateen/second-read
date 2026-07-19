@@ -56,9 +56,24 @@ async function eutilsFetch(
   }
 }
 
-function extractTag(xml: string, tag: string): string | undefined {
-  const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`));
-  return m ? m[1].replace(/<[^>]+>/g, "").trim() : undefined;
+// PubMed abstracts are frequently STRUCTURED: several <AbstractText Label="BACKGROUND|METHODS|
+// RESULTS|CONCLUSIONS"> sections. A single-match extract returns only the FIRST section (usually
+// BACKGROUND) and drops the actual RESULT/CONCLUSION — so downstream evidence-relevance scoring saw
+// a fragment with no finding and (correctly, given that input) returned "insufficient_evidence",
+// which starved confidence and defeated mischaracterization detection. Concatenate EVERY section,
+// prefixed with its label, so the model sees the whole abstract including the result.
+function extractAbstract(xml: string): string | undefined {
+  const parts: string[] = [];
+  const re = /<AbstractText([^>]*)>([\s\S]*?)<\/AbstractText>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const label = m[1].match(/Label="([^"]+)"/i)?.[1];
+    const text = m[2].replace(/<[^>]+>/g, "").trim();
+    if (!text) continue;
+    parts.push(label ? `${label}: ${text}` : text);
+  }
+  const joined = parts.join(" ").trim();
+  return joined || undefined;
 }
 
 async function fetchAbstractAndDoi(pmid: string): Promise<{ abstract?: string; doi?: string }> {
@@ -66,7 +81,7 @@ async function fetchAbstractAndDoi(pmid: string): Promise<{ abstract?: string; d
   if ("error" in r) return {};
   try {
     const xml = await r.text();
-    const abstract = extractTag(xml, "AbstractText");
+    const abstract = extractAbstract(xml);
     const doiMatch = xml.match(/<ArticleId IdType="doi">([^<]+)<\/ArticleId>/);
     return { abstract, doi: doiMatch?.[1] };
   } catch {
