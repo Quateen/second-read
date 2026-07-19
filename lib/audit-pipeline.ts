@@ -765,10 +765,12 @@ function compose(a: {
     ? "This audit could not be completed — a required step failed or did not return a usable verdict. No verdict was produced; absence of a verdict is not approval."
     : (a.synth?.tier_rationale || (notFound.length + " unverifiable citation(s), " + missingCrit + " critical missing-data item(s)."));
 
-  // TEMP (C4-diag — remove before the PR): surface a build marker + the RAW evidence verdicts so we
-  // can distinguish a stale deploy from an ineffective prompt. Rides the existing string[] field.
-  a.diagnostics.push("BUILD=C4-diag2");
-  a.diagnostics.push("EVID=" + JSON.stringify(a.evidence.map((e) => ({ v: e.verdict, al: e.alignment_0_100, c: String(e.claim_id).slice(0, 22) }))));
+  // TEMP (C4-diag — remove before the PR): build marker + deployed abstract lengths + raw evidence
+  // verdicts. ABSLEN proves whether the running build fetches FULL abstracts (~2000) or the old
+  // truncated first-section (~400). Rides the existing string[] field.
+  a.diagnostics.push("BUILD=C4-diag3");
+  a.diagnostics.push("ABSLEN=" + JSON.stringify(a.citationVerifs.map((v) => { const ab = (v.pubmed as any)?.abstract; return ab ? String(ab).length : 0; })));
+  a.diagnostics.push("EVID=" + JSON.stringify(a.evidence.map((e) => ({ v: e.verdict, al: e.alignment_0_100 }))));
 
   return {
     verdictTier: tt.v,
