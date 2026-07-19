@@ -256,11 +256,19 @@ async function scoreEvidence(
     const pm = v.pubmed as Extract<PubMedResult, { status: "found" }>;
     // Pair each abstract with the single most relevant claim (first in priority pool).
     const target = pool[0];
+    // The claim-extraction model names its fields loosely (observed: `claim_id`/`atomic_claim`
+    // rather than the `id`/`text` the JSDoc schema implies). Read the claim id + text TOLERANTLY —
+    // otherwise target.text is undefined, the evidence model gets an empty claim, and it correctly
+    // returns "insufficient_evidence" for EVERY citation, which starved confidence and defeated
+    // mischaracterization detection (the actual driver behind the CLEAN/OOS over-flagging).
+    const claimId = target.id ?? target.claim_id ?? target.cid ?? "c1";
+    const claimText = target.text ?? target.atomic_claim ?? target.claim ?? target.statement ?? target.verbatim_span ?? "";
+    const claimCat = target.category ?? "therapeutic";
     tasks.push(
       (async () => {
         const res = await callClaudeJSON<any>(
           EVIDENCE_RELEVANCE_PROMPT(
-            { id: target.id, text: target.text, category: target.category },
+            { id: claimId, text: claimText, category: claimCat },
             { id: v.raw, raw_text: v.raw, abstract: pm.abstract ?? null, title: pm.title ?? null }
           ),
           { temperature: 0.1, maxTokens: 700 }
@@ -269,13 +277,12 @@ async function scoreEvidence(
         accum(res.usage);
         const d: any = res.data;
         return {
-          claim_id: target.id,
+          claim_id: claimId,
           citation_raw: v.raw,
           verdict: String(d?.verdict ?? "insufficient_evidence"),
           alignment_0_100: Number(d?.alignment_0_100 ?? 0),
           rationale: String(d?.rationale ?? ""),
-          _dbg: "cid=" + target?.id + " ctxt=" + (target?.text ? String(target.text).slice(0, 16) : "MISSING")
-            + " rk=" + (d && typeof d === "object" && !Array.isArray(d) ? Object.keys(d).slice(0, 6).join("|") : typeof d),
+          _dbg: "ctxt=" + (claimText ? String(claimText).slice(0, 16) : "MISSING") + " v=" + String(d?.verdict),
         } as EvidenceVerdict;
       })()
     );
@@ -770,7 +777,7 @@ function compose(a: {
   // TEMP (C4-diag — remove before the PR): build marker + deployed abstract lengths + raw evidence
   // verdicts. ABSLEN proves whether the running build fetches FULL abstracts (~2000) or the old
   // truncated first-section (~400). Rides the existing string[] field.
-  a.diagnostics.push("BUILD=C4-diag4");
+  a.diagnostics.push("BUILD=C4-diag5");
   a.diagnostics.push("ABSLEN=" + JSON.stringify(a.citationVerifs.map((v) => { const ab = (v.pubmed as any)?.abstract; return ab ? String(ab).length : 0; })));
   a.diagnostics.push("CLAIMKEYS=" + (a.claim?.claims?.[0] ? Object.keys(a.claim.claims[0]).join("|") : "no-claims"));
   a.diagnostics.push("EVID=" + JSON.stringify(a.evidence.map((e) => ({ v: e.verdict, al: e.alignment_0_100, d: (e as any)._dbg }))));
