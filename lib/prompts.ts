@@ -336,6 +336,23 @@ Tier ladder (first match wins, top-down):
 3) minor_concerns — only UNVERIFIED CLAIMS and/or isolated overconfident phrasing, with NO risk driver present. This is the correct tier for a well-established, guideline-concordant statement that merely lacks an inline citation. Label such items "unverified — no citation provided", never "unsupported/dangerous".
 4) no_issues_detected — nothing above triggers AND every clinical claim was positively, deterministically corroborated. NEVER use this tier for a clinical claim that could not be verified.
 
+ESCALATION GATE (apply this FIRST, before anything else). You may choose significant_concerns or
+critical_issues ONLY if you can finish this sentence with a SPECIFIC item from the inputs below:
+"This is significant/critical because the [CITATIONS / EVIDENCE / MISSING_DATA / drug] input shows ___."
+Valid completions (a real risk driver):
+  • a citation marked not_found / unverifiable / fabricated;
+  • an EVIDENCE verdict of "contradicted" or "unsupported";
+  • a MISSING_DATA item marked "critical";
+  • a drug flagged non-existent, or a stated dose/route that is overtly dangerous;
+  • a specific clinical assertion that is factually FALSE or contraindicated on its face (e.g. "mannitol cures glioblastoma", "give 10× the normal dose").
+If you CANNOT finish that sentence with a concrete input item — i.e. the citations verified (or there
+are none to check), EVIDENCE is "supported"/"partially_supported"/"insufficient_evidence", MISSING_DATA
+is non-critical, drugs resolve, and the claims are established clinical practice — then you MUST choose
+no_issues_detected or minor_concerns. The following are NEVER valid completions and NEVER justify
+escalation: a claim being uncited, terse, "not fully specific", lacking effect sizes, not restating a
+guideline, or your own general unease. When there is no nameable driver, choose minor_concerns (if
+uncited/unverified) or no_issues_detected (if corroborated) — never significant/critical.
+
 Calibration guardrails (read before choosing the tier):
 - Absence of a citation is NOT, by itself, a significant or critical problem. Do NOT escalate a plausible, established claim to significant/critical solely because it lacks a citation — that is minor_concerns ("unverified"). Example: "Aspirin 81 mg once daily is commonly used for secondary prevention after ischemic stroke" has no citation but is guideline-concordant and safe → minor_concerns, NOT significant.
 - Reserve significant_concerns and critical_issues for ACTUAL risk drivers as defined above. Reason about whether the claim is dangerous, contradicted, or contested — not merely whether a citation string is present.
@@ -345,9 +362,12 @@ Calibration guardrails (read before choosing the tier):
 - Default LOW, not high. If every citation verified and the claims are guideline-concordant and correctly scoped, the tier is no_issues_detected. A correct, well-established, uncited general statement (e.g. comparing two established drugs) is minor_concerns at most ("unverified"), NEVER significant or critical. Reserve significant/critical for a real risk driver you can name in one sentence.
 
 Worked examples (calibrate to these):
-- "Early decompression within 24h of cervical SCI is associated with improved recovery (Fehlings, STASCIS, 2012)" — citation verifies, claim guideline-concordant and correctly scoped -> no_issues_detected. Do NOT down-grade it for not restating effect sizes.
-- "Levetiracetam and phenytoin have comparable efficacy for early post-traumatic seizure prophylaxis; levetiracetam is often preferred for its monitoring profile" — accurate, uncited, established drugs -> minor_concerns (unverified), NOT significant/critical.
-- "Methylprednisolone is the standard of care for ALL acute SCI (Bracken, NASCIS II)" — citation verifies but its abstract supports only a post-hoc subgroup; the claim over-generalizes -> significant_concerns (mischaracterization). THIS is a real risk driver — do not miss it.
+- "Early decompression within 24h of cervical SCI is associated with improved recovery (Fehlings, STASCIS, 2012)" — citation verifies + evidence "supported", correctly scoped -> no_issues_detected. Do NOT down-grade it for not restating effect sizes.
+- "Levetiracetam and phenytoin have comparable efficacy for early post-traumatic seizure prophylaxis; levetiracetam is often preferred for its monitoring profile" — accurate, uncited, established drugs, NO driver -> minor_concerns (unverified), NEVER significant/critical.
+- "Carotid endarterectomy reduces ipsilateral stroke in symptomatic 70-99% ICA stenosis (NASCET, 1991)" — verified, correctly scoped, evidence "supported" -> no_issues_detected.
+- "For acute DVT, apixaban is non-inferior to conventional therapy with less bleeding (Agnelli, AMPLIFY, 2013)" — correct, verified, off-domain (hematology). Off-domain is NOT a driver -> no_issues_detected. Do NOT escalate for being outside neuro/spine.
+- "Methylprednisolone is the standard of care for ALL acute SCI (Bracken, NASCIS II)" — citation verifies but evidence "partially_supported"/"contradicted" (over-generalizes a post-hoc subgroup) -> significant_concerns (mischaracterization). THIS is a real driver — do not miss it.
+- "Intravenous mannitol cures glioblastoma" — factually false / dangerous clinical assertion -> significant_concerns at least. THIS is a real driver — do not miss it.
 
 Hard rules:
 - specialty_match is INFORMATIONAL ONLY. Do NOT raise the tier, lower confidence, or trigger abstention merely because content is outside neurosurgery/spine. The verification methods work identically across all specialties. Judge the content purely on its citation, evidence, missing-data, and drug findings.
