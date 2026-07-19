@@ -190,19 +190,21 @@ Return ONLY valid JSON matching the schema. No prose, no markdown, no explanatio
 export const EVIDENCE_RELEVANCE_PROMPT = (
   claim: { id: string; text: string; category: string },
   citation: { id: string; raw_text: string; abstract: string | null; title?: string | null }
-): string => `Task: Judge whether the cited evidence actually supports the claim. Be strict. "Supported" requires concordance on population, intervention, and outcome.
+): string => `Task: Judge whether the cited evidence supports the claim. Judge the DIRECTION and clinical consistency of the finding — NOT whether the abstract restates the claim word-for-word. Abstracts are terse and rarely echo a claim's exact wording; that alone is never a reason to down-rate. A published trial/abstract on the same question whose result points the same way SUPPORTS a correctly-scoped claim.
 
-Verdicts:
-- supported: abstract directly evidences the claim, same PICO
-- partially_supported: same direction, but population, intervention, or outcome differs in ways that materially weaken the inference
-- unsupported: abstract is on-topic but does not address the claim
-- contradicted: abstract states the opposite
-- insufficient_evidence: abstract missing/empty, or too thin to judge — DEFAULT to this when uncertain
+Verdicts (choose the MOST ACCURATE — do not default to a lower/harsher one):
+- supported: the abstract's finding is consistent with the claim and points the same direction. A full verbatim PICO match is NOT required; a landmark trial cited for its own headline result, on the population it studied, is "supported".
+- partially_supported: same direction, but population, intervention, or outcome differs in a way that MATERIALLY weakens the inference — most commonly the claim OVER-GENERALIZES a specific result (e.g. "in all patients / regardless of time / including [a group the trial excluded]") beyond what the trial tested.
+- unsupported: the abstract is on-topic but genuinely does not bear on the claim — wrong population/question, or the claim asserts something the trial did not evaluate.
+- contradicted: the abstract's finding is the OPPOSITE of the claim (e.g. the trial found NO benefit, or harm, where the claim asserts benefit).
+- insufficient_evidence: the abstract is null/empty or truly uninformative about the claim. Use this ONLY when there is genuinely nothing to judge — NOT as a hedge when the abstract is merely brief or does not restate the claim.
 
 Rules:
 - If abstract is null or empty, verdict MUST be "insufficient_evidence" and alignment_0_100 <= 20.
+- A correctly-scoped claim backed by its own landmark trial is "supported" — do not manufacture a mismatch. Reserve partially_supported / unsupported / contradicted for a REAL population/intervention/outcome discrepancy, an over-generalization, or an opposite finding.
+- Watch specifically for over-generalization: words like "all", "any", "regardless of", "including [X]" attached to a result the trial demonstrated only in a specific population -> partially_supported or unsupported, never "supported".
 - evidence_quotes must be substrings of the abstract. If abstract is null, use [].
-- If the claim is outside neurosurgery/spine, set out_of_corpus = true and cap confidence_0_100 at 60.
+- If the claim is outside neurosurgery/spine, set out_of_corpus = true and cap confidence_0_100 at 60. Scope flag only — judge the evidence identically regardless of specialty.
 - Do not infer findings the abstract does not state.
 
 CLAIM:
@@ -338,6 +340,14 @@ Calibration guardrails (read before choosing the tier):
 - Absence of a citation is NOT, by itself, a significant or critical problem. Do NOT escalate a plausible, established claim to significant/critical solely because it lacks a citation — that is minor_concerns ("unverified"). Example: "Aspirin 81 mg once daily is commonly used for secondary prevention after ischemic stroke" has no citation but is guideline-concordant and safe → minor_concerns, NOT significant.
 - Reserve significant_concerns and critical_issues for ACTUAL risk drivers as defined above. Reason about whether the claim is dangerous, contradicted, or contested — not merely whether a citation string is present.
 - Do NOT weaken detection of risk drivers: a fabricated citation, a contradicted claim, a critical missing-data item, or a drug-safety issue MUST still reach significant_concerns or critical_issues as specified above. Fail-closed stays intact — an unverifiable clinical claim floors at minor_concerns and can never be no_issues_detected.
+- Do NOT invent findings. Presentational or stylistic observations are NOT risk drivers and must NEVER appear as findings or raise the tier: "outcome measure vague", "temporal specificity", "wording could be tighter", "lacks effect sizes", "could be more specific", "does not restate the guideline". A finding must be a concrete safety or accuracy defect — not a critique of phrasing, brevity, or prose completeness.
+- An evidence verdict of "insufficient_evidence" on a VERIFIED citation is NOT a risk driver — it means the retrieved abstract was terse, not that the claim is wrong. Do NOT escalate for it. Only "contradicted" or "unsupported" evidence verdicts (a real mischaracterization) escalate the tier.
+- Default LOW, not high. If every citation verified and the claims are guideline-concordant and correctly scoped, the tier is no_issues_detected. A correct, well-established, uncited general statement (e.g. comparing two established drugs) is minor_concerns at most ("unverified"), NEVER significant or critical. Reserve significant/critical for a real risk driver you can name in one sentence.
+
+Worked examples (calibrate to these):
+- "Early decompression within 24h of cervical SCI is associated with improved recovery (Fehlings, STASCIS, 2012)" — citation verifies, claim guideline-concordant and correctly scoped -> no_issues_detected. Do NOT down-grade it for not restating effect sizes.
+- "Levetiracetam and phenytoin have comparable efficacy for early post-traumatic seizure prophylaxis; levetiracetam is often preferred for its monitoring profile" — accurate, uncited, established drugs -> minor_concerns (unverified), NOT significant/critical.
+- "Methylprednisolone is the standard of care for ALL acute SCI (Bracken, NASCIS II)" — citation verifies but its abstract supports only a post-hoc subgroup; the claim over-generalizes -> significant_concerns (mischaracterization). THIS is a real risk driver — do not miss it.
 
 Hard rules:
 - specialty_match is INFORMATIONAL ONLY. Do NOT raise the tier, lower confidence, or trigger abstention merely because content is outside neurosurgery/spine. The verification methods work identically across all specialties. Judge the content purely on its citation, evidence, missing-data, and drug findings.
