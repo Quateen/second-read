@@ -23,7 +23,11 @@ const GOOGLE_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
 
 const MODELS: Record<Provider, string> = {
   claude: process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001",
-  gpt: process.env.OPENAI_MODEL || "gpt-4o-mini",
+  // gpt-4o-mini was the frequent lone over-voter on benign content (it voted critical/significant on
+  // clean cases while Claude+Gemini voted minor, and fail-closed took the most-severe vote -> the
+  // residual clean false-positive rate). gpt-4o is better calibrated for the tier judgment. Override
+  // via OPENAI_MODEL to tune cost/accuracy (e.g. a cheaper mini if it also holds clean_fp).
+  gpt: process.env.OPENAI_MODEL || "gpt-4o",
   gemini: process.env.GEMINI_MODEL || process.env.GOOGLE_MODEL || "gemini-1.5-flash",
 };
 
