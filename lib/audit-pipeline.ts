@@ -421,8 +421,15 @@ export async function runAudit(input: string, opts: { specialty?: string } = {})
       emit("voter", p, "start", "risk_synthesis");
       // Headroom: Claude has no strict JSON mode and can be verbose, so 2200 could truncate its
       // synth object into a fragment with no top-level tier (-> a null vote). 3500 avoids that.
+      // (retryOnParse/empty defaults on; callLLMJSON runs extractJSON + parseJSONLoose for every
+      // provider, so a slightly-off Claude payload is still recovered.)
       return callLLMJSON<any>(p, synthPrompt, { temperature: 0.2, maxTokens: 3500 });
-    }, { perCallTimeoutMs: 20000, quorumTimeoutMs: 14000 }),
+      // C1: the old 14s quorum cap STRUCTURALLY dropped Claude — Haiku generating up to 3500 synth
+      // tokens takes ~18-25s, so the primary voter was cut off before returning on ~half of audits,
+      // which (given fail-closed needs a COMPLETE quorum for a low tier) manufactured over-flagging.
+      // maxDuration is 60s and pre-synth work is ~6-12s, so widen the window to let Claude's
+      // complete vote land; still degrade honestly to 2-of-3 on a genuine >32s stall.
+    }, { perCallTimeoutMs: 34000, quorumTimeoutMs: 32000 }),
     callClaudeJSON<any>(SAFE_REWRITE_PROMPT({
       input: safeShort,
       findings: null,
