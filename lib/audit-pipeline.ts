@@ -274,6 +274,8 @@ async function scoreEvidence(
           verdict: String(d?.verdict ?? "insufficient_evidence"),
           alignment_0_100: Number(d?.alignment_0_100 ?? 0),
           rationale: String(d?.rationale ?? ""),
+          _dbg: "cid=" + target?.id + " ctxt=" + (target?.text ? String(target.text).slice(0, 16) : "MISSING")
+            + " rk=" + (d && typeof d === "object" && !Array.isArray(d) ? Object.keys(d).slice(0, 6).join("|") : typeof d),
         } as EvidenceVerdict;
       })()
     );
@@ -768,9 +770,10 @@ function compose(a: {
   // TEMP (C4-diag — remove before the PR): build marker + deployed abstract lengths + raw evidence
   // verdicts. ABSLEN proves whether the running build fetches FULL abstracts (~2000) or the old
   // truncated first-section (~400). Rides the existing string[] field.
-  a.diagnostics.push("BUILD=C4-diag3");
+  a.diagnostics.push("BUILD=C4-diag4");
   a.diagnostics.push("ABSLEN=" + JSON.stringify(a.citationVerifs.map((v) => { const ab = (v.pubmed as any)?.abstract; return ab ? String(ab).length : 0; })));
-  a.diagnostics.push("EVID=" + JSON.stringify(a.evidence.map((e) => ({ v: e.verdict, al: e.alignment_0_100 }))));
+  a.diagnostics.push("CLAIMKEYS=" + (a.claim?.claims?.[0] ? Object.keys(a.claim.claims[0]).join("|") : "no-claims"));
+  a.diagnostics.push("EVID=" + JSON.stringify(a.evidence.map((e) => ({ v: e.verdict, al: e.alignment_0_100, d: (e as any)._dbg }))));
 
   return {
     verdictTier: tt.v,
