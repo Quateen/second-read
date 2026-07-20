@@ -440,7 +440,7 @@ export async function runAudit(input: string, opts: { specialty?: string } = {})
       // which (given fail-closed needs a COMPLETE quorum for a low tier) manufactured over-flagging.
       // maxDuration is 60s and pre-synth work is ~6-12s, so widen the window to let Claude's
       // complete vote land; still degrade honestly to 2-of-3 on a genuine >32s stall.
-    }, { perCallTimeoutMs: 42000, quorumTimeoutMs: 40000 }),
+    }, { perCallTimeoutMs: 46000, quorumTimeoutMs: 44000 }),
     callClaudeJSON<any>(SAFE_REWRITE_PROMPT({
       input: safeShort,
       findings: null,
