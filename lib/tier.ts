@@ -94,6 +94,7 @@ export function escalateTier(sig: {
   unsupportedCount: number;   // cited sources that do not support their claim
   agreementScore: number;     // 0-100 ensemble / self-consistency agreement
   multiModel: boolean;
+  deterministicallyClean?: boolean; // >=1 verified+SUPPORTED citation AND zero risk drivers
 }): { tier: ComposeTier; overrides: string[] } {
   const overrides: string[] = [];
   const auditIncomplete = sig.votedTier === null;
@@ -131,6 +132,18 @@ export function escalateTier(sig: {
     if (sig.agreementScore < 40 && tier === "no_issues_detected") {
       tier = "minor_concerns";
       overrides.push(sig.multiModel ? "The ensemble models disagreed substantially." : "The two self-consistency passes disagreed substantially.");
+    }
+    // Deterministic-clean floor (the brief's "deterministic layer dominates where definitive"): when
+    // >=1 verified citation POSITIVELY supports its claim AND there is no risk driver, the
+    // deterministic layer is authoritative — an LLM sampling wobble may NOT escalate it. Cap
+    // significant/critical down to minor (still flagged + human-review, NEVER green). Safe by
+    // construction: the escalations above only fire on a driver (which sets deterministicallyClean
+    // false in the caller), and a harmful case always carries a driver, so this never lowers a real
+    // alarm. It also makes verified-clean cases reproducible (their tier no longer wobbles).
+    if (sig.deterministicallyClean && sig.contradictedCount === 0 && sig.unsupportedCount === 0 &&
+        (tier === "significant_concerns" || tier === "critical_issues")) {
+      tier = "minor_concerns";
+      overrides.push("Deterministic checks positively corroborate the content (verified + supported, no risk driver) — capping an LLM over-flag; human review still advised.");
     }
   }
   return { tier, overrides };

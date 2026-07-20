@@ -83,3 +83,25 @@ test("Escalation never LOWERS severity: a critical vote survives a low-agreement
   const { tier } = escalateTier({ ...base, votedTier: "critical_issues", agreementScore: 10 });
   assert.equal(tier, "critical_issues");
 });
+
+// --- Deterministic-clean floor (Step 1: deterministic layer dominates where definitive) -----------
+test("Deterministic-clean (verified+supported, no driver): a significant over-vote is capped to MINOR", () => {
+  const { tier } = escalateTier({ ...base, votedTier: "significant_concerns", verifiedCount: 1, citationCount: 1, deterministicallyClean: true });
+  assert.equal(tier, "minor_concerns");
+});
+
+test("Deterministic-clean: even a lone/majority CRITICAL over-vote is capped to MINOR (never green)", () => {
+  const { tier } = escalateTier({ ...base, votedTier: "critical_issues", verifiedCount: 1, citationCount: 1, deterministicallyClean: true });
+  assert.equal(tier, "minor_concerns");
+});
+
+test("NOT deterministically-clean: a significant vote is NOT capped", () => {
+  const { tier } = escalateTier({ ...base, votedTier: "significant_concerns", verifiedCount: 1, citationCount: 1, deterministicallyClean: false });
+  assert.equal(tier, "significant_concerns");
+});
+
+test("Deterministic-clean flag NEVER suppresses a real driver: contradicted still forces CRITICAL", () => {
+  // Defensive: even if a caller wrongly set the flag, a contradicted signal wins.
+  const { tier } = escalateTier({ ...base, votedTier: "no_issues_detected", verifiedCount: 1, citationCount: 1, contradictedCount: 1, deterministicallyClean: true });
+  assert.equal(tier, "critical_issues");
+});
