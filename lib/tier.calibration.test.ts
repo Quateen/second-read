@@ -84,24 +84,27 @@ test("Escalation never LOWERS severity: a critical vote survives a low-agreement
   assert.equal(tier, "critical_issues");
 });
 
-// --- Deterministic-clean floor (Step 1: deterministic layer dominates where definitive) -----------
-test("Deterministic-clean (verified+supported, no driver): a significant over-vote is capped to MINOR", () => {
-  const { tier } = escalateTier({ ...base, votedTier: "significant_concerns", verifiedCount: 1, citationCount: 1, deterministicallyClean: true });
-  assert.equal(tier, "minor_concerns");
-});
-
-test("Deterministic-clean: even a lone/majority CRITICAL over-vote is capped to MINOR (never green)", () => {
-  const { tier } = escalateTier({ ...base, votedTier: "critical_issues", verifiedCount: 1, citationCount: 1, deterministicallyClean: true });
-  assert.equal(tier, "minor_concerns");
-});
-
-test("NOT deterministically-clean: a significant vote is NOT capped", () => {
-  const { tier } = escalateTier({ ...base, votedTier: "significant_concerns", verifiedCount: 1, citationCount: 1, deterministicallyClean: false });
+// --- MIS-preservation: the removed "deterministic-clean floor" must NOT come back -----------------
+// The floor capped significant/critical -> minor whenever a citation verified and no evidence driver
+// fired. That under-flagged voter-caught mischaracterizations (MIS-01/02/08: a REAL, VERIFIED citation
+// whose claim over-generalizes it). These tests lock in the correct post-removal behavior: a verified
+// citation NEVER suppresses a voters' significant/critical verdict.
+test("MIS-01/02/08 shape: a SIGNIFICANT voter verdict on a verified citation STAYS significant (floor removed)", () => {
+  const { tier } = escalateTier({ ...base, votedTier: "significant_concerns", verifiedCount: 1, citationCount: 1 });
   assert.equal(tier, "significant_concerns");
 });
 
-test("Deterministic-clean flag NEVER suppresses a real driver: contradicted still forces CRITICAL", () => {
-  // Defensive: even if a caller wrongly set the flag, a contradicted signal wins.
-  const { tier } = escalateTier({ ...base, votedTier: "no_issues_detected", verifiedCount: 1, citationCount: 1, contradictedCount: 1, deterministicallyClean: true });
+test("MIS-02 shape: a unanimous CRITICAL verdict on a verified citation STAYS critical (floor removed)", () => {
+  const { tier } = escalateTier({ ...base, votedTier: "critical_issues", verifiedCount: 1, citationCount: 1 });
+  assert.equal(tier, "critical_issues");
+});
+
+test("A verified citation does not, by itself, lower a significant vote", () => {
+  const { tier } = escalateTier({ ...base, votedTier: "significant_concerns", verifiedCount: 3, citationCount: 3 });
+  assert.equal(tier, "significant_concerns");
+});
+
+test("MIS-03 shape: a contradicted cited abstract still forces CRITICAL even over a green vote", () => {
+  const { tier } = escalateTier({ ...base, votedTier: "no_issues_detected", verifiedCount: 1, citationCount: 1, contradictedCount: 1 });
   assert.equal(tier, "critical_issues");
 });

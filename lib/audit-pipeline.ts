@@ -613,28 +613,10 @@ function compose(a: {
   const hasHighStakes = Array.isArray(a.claim?.claims) && a.claim.claims.some((c: any) => (HIGH_STAKES_CATEGORIES as readonly string[]).includes(c.category));
   const contradicted = a.evidence.filter((e) => e.verdict === "contradicted");
   const unsupported = a.evidence.filter((e) => e.verdict === "unsupported");
-  // Deterministic-clean signal: the deterministic layer POSITIVELY corroborates the content (>=1
-  // verified citation whose abstract SUPPORTS its claim) and finds NO risk driver (no not_found
-  // citation, contradicted/unsupported evidence, critical missing-data, or unresolved drug). In that
-  // state the deterministic layer is definitive and dominates the tier — an LLM sampling wobble
-  // cannot escalate an otherwise-verified-clean case. Requires POSITIVE support, so a no-citation
-  // claim (e.g. "mannitol cures GBM") or a mischaracterization never qualifies -> the LLM still
-  // governs there. This is the brief's "deterministic layer dominates where definitive"; it is NOT
-  // the lone-outlier cap and never fires on a harmful case (they all carry a driver).
-  const missItemsC: any[] = Array.isArray((a.missing as any)?.missing_items) ? (a.missing as any).missing_items : [];
-  const critMissing = missItemsC.some((m: any) => m?.severity === "critical");
-  const drugUnresolved = a.drugVerifs.some((d) => d.r.status !== "found");
-  // Anchor on the DETERMINISTIC signal — a citation that PubMed/CrossRef positively FOUND — not on
-  // the LLM "supported" verdict (which wobbles supported<->partially<->insufficient and would make
-  // the floor itself non-deterministic). Fire when >=1 citation is found AND there is no negative
-  // driver (not_found / contradicted / unsupported evidence / critical missing-data / unresolved
-  // drug). A mischaracterization carries a contradicted/unsupported verdict (-> not clean -> still
-  // escalates); if its evidence merely under-calls to insufficient, that is ALREADY a detection miss
-  // (the mischaracterization gate is evidence-verdict-based, unaffected by this tier cap).
-  const deterministicallyClean =
-    verified.length > 0 && notFound.length === 0 && contradicted.length === 0 &&
-    unsupported.length === 0 && !critMissing && !drugUnresolved;
   // Final tier = cross-model vote + deterministic escalations (pure, unit-tested in escalateTier).
+  // NOTE (2026-07-21): the "deterministic-clean floor" that used a verified-citation signal to cap
+  // significant/critical -> minor was REMOVED (it under-flagged voter-caught mischaracterizations
+  // MIS-01/02/08). See tier.ts escalateTier for the rationale. Do NOT reintroduce it.
   const { tier, overrides } = escalateTier({
     votedTier: a.votedTier,
     disagreement: a.disagreement,
@@ -645,7 +627,6 @@ function compose(a: {
     unsupportedCount: unsupported.length,
     agreementScore: a.agreement.score,
     multiModel: a.multiModel,
-    deterministicallyClean,
   });
 
   const tierMap = {
