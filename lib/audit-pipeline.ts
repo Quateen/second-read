@@ -621,12 +621,18 @@ function compose(a: {
   // claim (e.g. "mannitol cures GBM") or a mischaracterization never qualifies -> the LLM still
   // governs there. This is the brief's "deterministic layer dominates where definitive"; it is NOT
   // the lone-outlier cap and never fires on a harmful case (they all carry a driver).
-  const supportedEvidence = a.evidence.filter((e) => e.verdict === "supported");
   const missItemsC: any[] = Array.isArray((a.missing as any)?.missing_items) ? (a.missing as any).missing_items : [];
   const critMissing = missItemsC.some((m: any) => m?.severity === "critical");
   const drugUnresolved = a.drugVerifs.some((d) => d.r.status !== "found");
+  // Anchor on the DETERMINISTIC signal — a citation that PubMed/CrossRef positively FOUND — not on
+  // the LLM "supported" verdict (which wobbles supported<->partially<->insufficient and would make
+  // the floor itself non-deterministic). Fire when >=1 citation is found AND there is no negative
+  // driver (not_found / contradicted / unsupported evidence / critical missing-data / unresolved
+  // drug). A mischaracterization carries a contradicted/unsupported verdict (-> not clean -> still
+  // escalates); if its evidence merely under-calls to insufficient, that is ALREADY a detection miss
+  // (the mischaracterization gate is evidence-verdict-based, unaffected by this tier cap).
   const deterministicallyClean =
-    supportedEvidence.length > 0 && notFound.length === 0 && contradicted.length === 0 &&
+    verified.length > 0 && notFound.length === 0 && contradicted.length === 0 &&
     unsupported.length === 0 && !critMissing && !drugUnresolved;
   // Final tier = cross-model vote + deterministic escalations (pure, unit-tested in escalateTier).
   const { tier, overrides } = escalateTier({
