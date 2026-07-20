@@ -81,6 +81,33 @@ test("runQuorum drops a voter slower than the quorum timeout (real 2-of-3)", asy
   assert.equal(quorum, "2of3");
 });
 
+// --- Option B: bounded lone-outlier cap -------------------------------------------------------
+test("Option B: a LONE severe vote with a majority-low and NO driver -> capped to minor + flag", () => {
+  const d = decideFinalTier([v("gpt", "critical_issues"), v("claude", "minor_concerns"), v("gemini", "minor_concerns")], true, 3, false);
+  assert.equal(d.tier, "minor_concerns");
+  assert.equal(d.humanReviewFlag, true);
+});
+
+test("Option B: a LONE significant vote over a majority-low, NO driver -> capped to minor", () => {
+  const d = decideFinalTier([v("gpt", "significant_concerns"), v("claude", "no_issues_detected"), v("gemini", "minor_concerns")], true, 3, false);
+  assert.equal(d.tier, "minor_concerns");
+});
+
+test("Option B: a lone severe vote WITH a deterministic driver is NOT capped (safety preserved)", () => {
+  const d = decideFinalTier([v("gpt", "critical_issues"), v("claude", "minor_concerns"), v("gemini", "minor_concerns")], true, 3, true);
+  assert.equal(d.tier, "critical_issues");
+});
+
+test("Option B: TWO severe votes (not a lone outlier) are NEVER capped", () => {
+  const d = decideFinalTier([v("gpt", "critical_issues"), v("claude", "critical_issues"), v("gemini", "minor_concerns")], true, 3, false);
+  assert.equal(d.tier, "critical_issues");
+});
+
+test("Option B: a lone severe vote in a 2-vote quorum (no majority-low) is NOT capped", () => {
+  const d = decideFinalTier([v("gpt", "critical_issues"), v("claude", "minor_concerns")], true, 3, false);
+  assert.equal(d.tier, "critical_issues");
+});
+
 test("agreement mode is truthful — never '3-model' unless 3 returned", () => {
   assert.equal(agreementMode(3, true), "ensemble:3");
   assert.equal(agreementMode(2, true), "ensemble:2");

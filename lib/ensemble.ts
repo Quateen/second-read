@@ -112,6 +112,7 @@ export function decideFinalTier(
   votes: TierVote[],
   deterministicCorroborated: boolean,
   totalProviders: number,
+  hasRiskDriver: boolean = false,
 ): { tier: SynthTier | null; unanimous: boolean; disagreement: boolean; humanReviewFlag: boolean; quorumOk: number } {
   const valid = votes.map((v) => v.tier).filter((t): t is SynthTier => !!t);
   const quorumOk = valid.length;
@@ -128,9 +129,24 @@ export function decideFinalTier(
     // Cannot be green: conservative bump + human review.
     return { tier: "minor_concerns", unanimous, disagreement: !unanimous, humanReviewFlag: true, quorumOk };
   }
-  // Non-green: most-severe vote wins; disagreement or an incomplete quorum raises the flag.
+  // Non-green: most-severe vote wins.
+  let tier: SynthTier = mostSevere;
+  // Bounded lone-outlier cap: a SINGLE model voting significant/critical while a MAJORITY (>=2) voted
+  // minor/no_issues, with NO deterministic risk driver present, is almost always a hallucinated
+  // over-flag (the dominant source of clean-content false positives). Cap it to minor_concerns —
+  // still flagged + human review, NEVER green. This does NOT weaken never-green, and it never fires
+  // when a deterministic driver exists (hasRiskDriver) or when >=2 models agree on a severe tier, so
+  // a genuine danger with any corroboration still escalates. The residual, accepted tradeoff: a
+  // danger that ONLY one model catches with zero deterministic signal softens to minor + human review.
+  const severeCount = valid.filter((t) => TIER_SEVERITY[t] >= TIER_SEVERITY.significant_concerns).length;
+  const lowCount = valid.filter((t) => TIER_SEVERITY[t] <= TIER_SEVERITY.minor_concerns).length;
+  const loneOutlierSevere = severeCount === 1 && lowCount >= 2;
+  if (!hasRiskDriver && loneOutlierSevere) {
+    tier = "minor_concerns";
+  }
+  // disagreement or an incomplete quorum raises the flag.
   return {
-    tier: mostSevere,
+    tier,
     unanimous,
     disagreement: !unanimous,
     humanReviewFlag: !unanimous || incompleteQuorum,

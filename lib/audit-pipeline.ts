@@ -487,7 +487,14 @@ export async function runAudit(input: string, opts: { specialty?: string } = {})
   const anyUnresolvedCitation = allVerifs.some((v) =>
     !v.unverifiable && !(v.pubmed?.status === "found" || v.crossref?.status === "found"));
   const anyDrugUnresolved = drugVerifs.some((d) => d.r.status !== "found");
-  const tierDecision = decideFinalTier(tierVotes, !anyUnresolvedCitation && !anyDrugUnresolved, providers.length);
+  // Option B guard: is ANY deterministic risk driver present? A driver -> the fail-closed lone-outlier
+  // cap must NOT fire (safety). Drivers: a not_found citation, an unresolved drug, a contradicted/
+  // unsupported cited abstract, or a "critical" missing-data item.
+  const anyEvidenceDriver = evidence.some((e) => e.verdict === "contradicted" || e.verdict === "unsupported");
+  const missItems: any[] = missing.ok && Array.isArray((missing.data as any)?.missing_items) ? (missing.data as any).missing_items : [];
+  const anyCriticalMissing = missItems.some((m) => m?.severity === "critical");
+  const hasRiskDriver = anyUnresolvedCitation || anyDrugUnresolved || anyEvidenceDriver || anyCriticalMissing;
+  const tierDecision = decideFinalTier(tierVotes, !anyUnresolvedCitation && !anyDrugUnresolved, providers.length, hasRiskDriver);
 
   // A step is USABLE if it parsed to an object (arrays/primitives are mis-parses). Field-level
   // shape is read leniently downstream \u2014 never reject a whole step for a missing optional field
