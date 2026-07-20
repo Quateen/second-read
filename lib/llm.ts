@@ -124,6 +124,10 @@ export async function callLLMJSON<T = unknown>(
         {
           model: MODELS.gpt,
           temperature,
+          // Fixed seed -> reproducible categorical votes across runs (Step 1 determinism). OpenAI is
+          // the only provider with a seed param; Claude/Gemini rely on temperature 0. Best-effort:
+          // the API does not guarantee identical output, but it substantially reduces sampling drift.
+          seed: 1729,
           max_tokens: maxTokens,
           response_format: { type: "json_object" },
           messages: [

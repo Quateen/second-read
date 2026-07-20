@@ -271,7 +271,7 @@ async function scoreEvidence(
             { id: claimId, text: claimText, category: claimCat },
             { id: v.raw, raw_text: v.raw, abstract: pm.abstract ?? null, title: pm.title ?? null }
           ),
-          { temperature: 0.1, maxTokens: 700 }
+          { temperature: 0, maxTokens: 700 }
         );
         if (!res.ok) return null;
         accum(res.usage);
@@ -321,17 +321,20 @@ export async function runAudit(input: string, opts: { specialty?: string } = {})
 
   const claimPrompt = CLAIM_EXTRACTION_PROMPT(safe);
   const [claim, claimHot, citationLLM, missing, citationVerifs, drugVerifs, ...extraPasses] = await Promise.all([
-    callClaudeJSON<any>(claimPrompt, { temperature: 0.2, maxTokens: 1800 }),
+    // Determinism (Step 1): temperature 0 on every CATEGORICAL/decision vote (claim extraction,
+    // citation/missing extraction, evidence relevance, risk tier, confidence) so the same input
+    // reproduces the same verdict across runs. Only the generative safe-rewrite keeps a temperature.
+    callClaudeJSON<any>(claimPrompt, { temperature: 0, maxTokens: 1800 }),
     // Hot Claude pass: used for self-consistency when no other model is available.
     useMultiModel
       ? Promise.resolve({ ok: false, reason: "empty" as const })
       : callClaudeJSON<any>(claimPrompt, { temperature: 0.7, maxTokens: 1100, retryOnParse: false }),
-    callClaudeJSON<any>(CITATION_EXTRACTION_PROMPT(safe), { temperature: 0.2, maxTokens: 1200 }),
-    callClaudeJSON<any>(MISSING_DATA_PROMPT(safe), { temperature: 0.2, maxTokens: 1200 }),
+    callClaudeJSON<any>(CITATION_EXTRACTION_PROMPT(safe), { temperature: 0, maxTokens: 1200 }),
+    callClaudeJSON<any>(MISSING_DATA_PROMPT(safe), { temperature: 0, maxTokens: 1200 }),
     Promise.all(preCitations.map(verifyOneCitation)),
     verifyDrugs(safe),
     // Independent passes from the other providers (parallel, lighter, no parse-retry).
-    ...extraProviders.map((p) => callLLMJSON<any>(p, claimPrompt, { temperature: 0.2, maxTokens: 1100, retryOnParse: false })),
+    ...extraProviders.map((p) => callLLMJSON<any>(p, claimPrompt, { temperature: 0, maxTokens: 1100, retryOnParse: false })),
   ]);
   for (const r of [claim, claimHot, citationLLM, missing]) if (r.ok && "usage" in r) accum(r.usage);
   for (const r of extraPasses) if (r.ok && "usage" in r) accum(r.usage);
@@ -431,13 +434,13 @@ export async function runAudit(input: string, opts: { specialty?: string } = {})
       // synth object into a fragment with no top-level tier (-> a null vote). 3500 avoids that.
       // (retryOnParse/empty defaults on; callLLMJSON runs extractJSON + parseJSONLoose for every
       // provider, so a slightly-off Claude payload is still recovered.)
-      return callLLMJSON<any>(p, synthPrompt, { temperature: 0.2, maxTokens: 3500 });
+      return callLLMJSON<any>(p, synthPrompt, { temperature: 0, maxTokens: 3500 });
       // C1: the old 14s quorum cap STRUCTURALLY dropped Claude — Haiku generating up to 3500 synth
       // tokens takes ~18-25s, so the primary voter was cut off before returning on ~half of audits,
       // which (given fail-closed needs a COMPLETE quorum for a low tier) manufactured over-flagging.
       // maxDuration is 60s and pre-synth work is ~6-12s, so widen the window to let Claude's
       // complete vote land; still degrade honestly to 2-of-3 on a genuine >32s stall.
-    }, { perCallTimeoutMs: 38000, quorumTimeoutMs: 36000 }),
+    }, { perCallTimeoutMs: 42000, quorumTimeoutMs: 40000 }),
     callClaudeJSON<any>(SAFE_REWRITE_PROMPT({
       input: safeShort,
       findings: null,
@@ -452,7 +455,7 @@ export async function runAudit(input: string, opts: { specialty?: string } = {})
       specialty_match: specialtyMatch,
       // The confidence schema is the largest (5 nested factor objects + drivers); 800 tokens can
       // truncate it into invalid JSON, so give it room.
-    }), { temperature: 0.1, maxTokens: 1500 }),
+    }), { temperature: 0, maxTokens: 1500 }),
   ]);
   if (rewrite.ok) accum(rewrite.usage);
   if (conf.ok) accum(conf.usage);
