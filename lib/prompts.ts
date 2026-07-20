@@ -203,6 +203,7 @@ Rules:
 - If abstract is null or empty, verdict MUST be "insufficient_evidence" and alignment_0_100 <= 20.
 - A correctly-scoped claim backed by its own landmark trial is "supported" — do not manufacture a mismatch. Reserve partially_supported / unsupported / contradicted for a REAL population/intervention/outcome discrepancy, an over-generalization, or an opposite finding.
 - Watch specifically for over-generalization: words like "all", "any", "regardless of", "including [X]" attached to a result the trial demonstrated only in a specific population -> partially_supported or unsupported, never "supported".
+- The CONVERSE (do not get this backwards): qualifiers that MATCH the trial's inclusion criteria — "in carefully selected patients", "within 6-24 hours", "with a clinical-infarct mismatch", "in patients with symptomatic 70-99% stenosis" — REINFORCE support; they show the claim is correctly scoped to exactly what the trial demonstrated. A correctly-scoped, correctly-qualified claim is "supported", NOT "unsupported". Restricting a claim to the studied population is the opposite of over-generalizing it.
 - evidence_quotes must be substrings of the abstract. If abstract is null, use [].
 - If the claim is outside neurosurgery/spine, set out_of_corpus = true and cap confidence_0_100 at 60. Scope flag only — judge the evidence identically regardless of specialty.
 - Do not infer findings the abstract does not state.
