@@ -565,6 +565,10 @@ export async function runAudit(input: string, opts: { specialty?: string } = {})
     diag("citations", citationLLM),
     diag("missing_data", missing),
     synthUsable ? null : describe("risk_synthesis", synth),
+    // Per-provider synth-VOTE failures (surfaced even when the overall synth is usable via another
+    // provider). A dropped voter shrinks the quorum and disables the lone-outlier cap, so its reason
+    // (parse/empty/api/timeout) is a first-class reliability signal — not just a Vercel-console log.
+    ...synthResults.filter((r) => !r.ok).map((r) => `synth_vote(${r.provider}): ${r.reason ?? "?"}${(r as any).detail ? " — " + String((r as any).detail).slice(0, 160) : ""}`),
     diag("safe_rewrite", rewrite),
     confUsable ? null : describe("confidence", conf),
   ].filter((x): x is string => x !== null);
