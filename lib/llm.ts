@@ -175,14 +175,20 @@ export async function callLLMJSON<T = unknown>(
   };
 
   const first = await attempt();
-  // Retry once on a parse failure OR an empty/blocked response — both are commonly transient (a
-  // truncated JSON, a momentary empty Gemini candidate). "api"/"no_key" are NOT retried here: a
-  // retry would not fit inside the quorum window and cannot fix an auth/outage problem.
-  const retryable = !first.ok && (first.reason === "parse" || first.reason === "empty");
+  // Retry once on a parse failure, an empty/blocked response, OR a transient api error. All three are
+  // commonly transient (a truncated JSON, a momentary empty Gemini candidate, a 429/5xx or brief
+  // timeout). Retrying "api" is what keeps a fast provider (Gemini-flash) IN the quorum: a dropped
+  // Gemini vote lowers lowCount below the lone-outlier cap's threshold, so an isolated gpt over-vote
+  // on CLEAN content stands as SIGNIFICANT — the dominant reproducibility failure. The retry is still
+  // bounded by the caller's quorum window (runQuorum's quorumTimeoutMs), so a genuine outage or a
+  // slow provider that cannot fit a second attempt is simply dropped as before — no latency regression.
+  const retryable = !first.ok && (first.reason === "parse" || first.reason === "empty" || first.reason === "api");
   if (first.ok || !retryable || !retryOnParse) return first;
-  const nudge = !first.ok && first.reason === "empty"
+  const nudge = first.reason === "empty"
     ? "Your previous response was empty. Return the requested STRICT valid JSON now, with no preamble."
-    : "Your previous response failed to parse as JSON. Return STRICT valid JSON only.";
+    : first.reason === "parse"
+    ? "Your previous response failed to parse as JSON. Return STRICT valid JSON only."
+    : undefined; // transient api error — retry the same call, no nudge
   return attempt(nudge);
 }
 
