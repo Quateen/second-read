@@ -472,14 +472,7 @@ export async function runAudit(input: string, opts: { specialty?: string } = {})
       // synth object into a fragment with no top-level tier (-> a null vote). 3500 avoids that.
       // (retryOnParse/empty defaults on; callLLMJSON runs extractJSON + parseJSONLoose for every
       // provider, so a slightly-off Claude payload is still recovered.)
-      // Gemini-1.5-flash is the SLOWEST synth voter — generating up to 3500 JSON-mode tokens can push
-      // it past the 44s quorum window, dropping its vote (~11-19% observed). A dropped Gemini shrinks
-      // the quorum below the lone-outlier cap's lowCount>=2, so an isolated gpt over-vote on CLEAN
-      // content then stands as SIGNIFICANT — the sole remaining clean over-flag driver. Gemini's tier
-      // ballot (tier + short rationale + <=10 capped findings) fits comfortably in 1800 tokens; capping
-      // it there makes Gemini finish inside the window WITHOUT truncation (a rare truncation is still
-      // caught by the parse-retry). Claude keeps 3500 (it authors the primary rationale/findings).
-      return callLLMJSON<any>(p, synthPrompt, { temperature: 0, maxTokens: p === "gemini" ? 1800 : 3500 });
+      return callLLMJSON<any>(p, synthPrompt, { temperature: 0, maxTokens: 3500 });
       // C1: the old 14s quorum cap STRUCTURALLY dropped Claude — Haiku generating up to 3500 synth
       // tokens takes ~18-25s, so the primary voter was cut off before returning on ~half of audits,
       // which (given fail-closed needs a COMPLETE quorum for a low tier) manufactured over-flagging.
