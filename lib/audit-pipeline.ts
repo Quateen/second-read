@@ -227,13 +227,47 @@ function toPass(provider: Provider | "claude-hot", label: string, r: { ok: boole
 // --- Evidence relevance ----------------------------------------------------
 // For citations that verified against PubMed WITH an abstract, score whether
 // the abstract actually supports the most relevant high-stakes claim.
-type EvidenceVerdict = {
+export type EvidenceVerdict = {
   claim_id: string;
   citation_raw: string;
   verdict: string;
   alignment_0_100: number;
   rationale: string;
+  // The model's own structured PICO comparison (already in the schema but previously discarded).
+  // Used to reconcile a self-inconsistent harsh gestalt verdict (see reconcileEvidenceVerdict).
+  population_match?: string;
+  intervention_match?: string;
+  outcome_match?: string;
 };
+
+// A single Claude "unsupported" gestalt verdict on a DETERMINISTICALLY-VERIFIED citation is the
+// dominant driver of CLEAN over-flag reproducibility failures (e.g. CLEAN-04 / DAWN, correctly scoped
+// but sporadically read as "unsupported"). Reconcile it against the model's OWN structured PICO
+// self-report: if the model simultaneously reports population_match === "match" AND neither the
+// intervention nor the outcome is a "mismatch", then it found NO real discrepancy — its "unsupported"
+// is internally inconsistent and is downgraded to the NON-escalating, NON-reassuring
+// "insufficient_evidence". Safe by construction:
+//   • Only "unsupported" is reconciled — "contradicted" (an opposite finding) is NEVER touched.
+//   • It fires ONLY when population_match is strictly "match" (an over-generalization reports
+//     "adjacent"/"mismatch", a wrong-population MIS reports "mismatch") — so MIS-04/06 (wrong
+//     population/cohort) and MIS-01/02/08 (over-generalization) never reconcile away.
+//   • Over-generalizations are independently caught by the risk-synthesis voters regardless.
+export function reconcileEvidenceVerdict(v: EvidenceVerdict): EvidenceVerdict {
+  if (v.verdict !== "unsupported") return v;
+  const pop = (v.population_match ?? "").toLowerCase();
+  const intv = (v.intervention_match ?? "").toLowerCase();
+  const out = (v.outcome_match ?? "").toLowerCase();
+  const noDiscrepancy = pop === "match" && intv !== "mismatch" && out !== "mismatch";
+  if (!noDiscrepancy) return v;
+  return {
+    ...v,
+    verdict: "insufficient_evidence",
+    rationale:
+      "[reconciled] model's own PICO self-report shows population match with no intervention/outcome " +
+      "mismatch, so the 'unsupported' gestalt is internally inconsistent — treated as insufficient, not a driver. " +
+      v.rationale,
+  };
+}
 
 async function scoreEvidence(
   claim: any,
@@ -276,13 +310,17 @@ async function scoreEvidence(
         if (!res.ok) return null;
         accum(res.usage);
         const d: any = res.data;
-        return {
+        const verdict: EvidenceVerdict = {
           claim_id: claimId,
           citation_raw: v.raw,
           verdict: String(d?.verdict ?? "insufficient_evidence"),
           alignment_0_100: Number(d?.alignment_0_100 ?? 0),
           rationale: String(d?.rationale ?? ""),
-        } as EvidenceVerdict;
+          population_match: d?.population_match != null ? String(d.population_match) : undefined,
+          intervention_match: d?.intervention_match != null ? String(d.intervention_match) : undefined,
+          outcome_match: d?.outcome_match != null ? String(d.outcome_match) : undefined,
+        };
+        return reconcileEvidenceVerdict(verdict);
       })()
     );
   }
